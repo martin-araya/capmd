@@ -14,6 +14,7 @@ reportar tiempo, tamaño y páginas al caller (B5).
 from __future__ import annotations
 
 import importlib.util
+import io
 import signal
 import time
 from pathlib import Path
@@ -191,6 +192,69 @@ class Engine:
             page_count=None,
             size_bytes=None,
         )
+
+    def convert_pages(
+        self,
+        path: Path,
+        *,
+        limits: ConversionLimits | None = None,
+    ) -> list[str]:
+        """Convierte cada página del PDF por separado.
+
+        Solo PDF. Para otros formatos levanta :class:`UnsupportedFormat`.
+        Devuelve una lista con N strings, uno por página (páginas vacías
+        devuelven string vacío).
+        """
+        effective = limits or self._limits
+        if not path.exists() or not path.is_file():
+            raise SourceNotFound(
+                f"no se encontró el archivo: {path}",
+                hint="verificá la ruta o pasá el archivo por stdin con --ext",
+            )
+        info = self.check_supported(path)
+        if info.extension != ".pdf":
+            raise UnsupportedFormat(
+                f"convert_pages solo aplica a PDF, no a {info.name}: {path.name}",
+                hint="usá convert_path para una conversión sin markers",
+            )
+
+        size_bytes = path.stat().st_size
+        _check_size_limit(size_bytes, effective, source=path.name)
+
+        try:
+            from pypdf import PdfReader, PdfWriter
+        except ImportError:
+            raise UnsupportedFormat(
+                f"pypdf no instalado: no puedo convertir página por página ({path.name})",
+                hint="pip install pypdf",
+            ) from None
+
+        reader = PdfReader(str(path))
+        n_pages = len(reader.pages)
+        _check_page_count_limit(n_pages, effective, source=path.name)
+        _maybe_warn_large_pdf(n_pages, effective)
+
+        logger.debug("convirtiendo %d páginas individualmente de %s", n_pages, path)
+        pages: list[str] = []
+        for idx, page in enumerate(reader.pages, start=1):
+            writer = PdfWriter()
+            writer.add_page(page)
+            buf = io.BytesIO()
+            writer.write(buf)
+            buf.seek(0)
+            try:
+                result = _run_with_timeout(
+                    lambda buf=buf: self._md.convert_stream(
+                        buf, stream_info=StreamInfo(extension=".pdf")
+                    ),
+                    timeout_seconds=effective.timeout_seconds,
+                    failure_label=f"markitdown page {idx} ({path.name})",
+                )
+            finally:
+                buf.close()
+            pages.append(_extract_markdown(result))
+        logger.debug("ok %d páginas convertidas", len(pages))
+        return pages
 
 
 def _extract_markdown(result: Any) -> str:
