@@ -153,6 +153,30 @@ def convert(
             "(B6). Default: no se guarda."
         ),
     ),
+    no_clean: bool = typer.Option(
+        False,
+        "--no-clean",
+        help=(
+            "Salta todos los cleaners. El output es byte-a-byte el markdown "
+            "crudo del engine. Equivalente a --keep-raw sin guardar snapshot."
+        ),
+    ),
+    only_clean: str | None = typer.Option(
+        None,
+        "--only-clean",
+        help=(
+            "Lista separada por comas de cleaners a ejecutar (ej: 'headers,hyphens'). "
+            "Mutuamente excluyente con --skip-clean. Default: todos."
+        ),
+    ),
+    skip_clean: str | None = typer.Option(
+        None,
+        "--skip-clean",
+        help=(
+            "Lista separada por comas de cleaners a saltar (ej: 'tables'). "
+            "Mutuamente excluyente con --only-clean. Default: ninguno."
+        ),
+    ),
     pages: str | None = typer.Option(
         None,
         "--pages",
@@ -189,9 +213,12 @@ def convert(
         raise typer.BadParameter(str(exc)) from None
 
     if chapter is not None and pages is not None:
-        raise typer.BadParameter(
-            "--chapter y --pages son mutuamente excluyentes"
-        )
+        raise typer.BadParameter("--chapter y --pages son mutuamente excluyentes")
+
+    only_clean_str = only_clean if isinstance(only_clean, str) else None
+    skip_clean_str = skip_clean if isinstance(skip_clean, str) else None
+    if only_clean_str and skip_clean_str:
+        raise typer.BadParameter("--only-clean y --skip-clean son mutuamente excluyentes")
 
     # EPUB no soporta --pages ni --page-offset (no hay paginación física).
     # Validamos temprano para fallar con mensaje claro antes de abrir el archivo.
@@ -199,13 +226,9 @@ def convert(
     is_epub = source_path.suffix.lower() == ".epub" if source != "-" else False
     if is_epub:
         if pages is not None:
-            raise typer.BadParameter(
-                "--pages no aplica a EPUB; usá --chapter"
-            )
+            raise typer.BadParameter("--pages no aplica a EPUB; usá --chapter")
         if page_offset != 0:
-            raise typer.BadParameter(
-                "--page-offset no aplica a EPUB (no hay paginación física)"
-            )
+            raise typer.BadParameter("--page-offset no aplica a EPUB (no hay paginación física)")
 
     engine = Engine(limits=limits)
     sliced_temp: Path | None = None
@@ -264,20 +287,37 @@ def convert(
     _report_timing(result)
     if sliced_temp is not None:
         sliced_temp.unlink(missing_ok=True)
+
+    raw_markdown = result.markdown
+    if source == "-":
+        final_markdown = _apply_clean_pipeline_to_stdin(
+            raw_markdown,
+            no_clean=no_clean,
+            only_clean=only_clean,
+            skip_clean=skip_clean,
+            ext=ext or "other",
+        )
+    else:
+        final_markdown = _apply_clean_pipeline(
+            raw_markdown,
+            no_clean=no_clean,
+            only_clean=only_clean,
+            skip_clean=skip_clean,
+            target_path=target_path,
+        )
+
     if keep_raw:
-        snapshot_path = write_raw_snapshot(result.markdown, output_path=output)
+        snapshot_path = write_raw_snapshot(raw_markdown, output_path=output)
         logger.info("snapshot crudo: %s", snapshot_path)
         _stderr.print(f"[dim]snapshot crudo: {snapshot_path}[/dim]")
     if output is None:
-        typer.echo(result.markdown)
+        typer.echo(final_markdown)
         return
-    output.write_text(result.markdown, encoding="utf-8")
-    logger.debug("escrito %d chars a %s", len(result.markdown), output)
+    output.write_text(final_markdown, encoding="utf-8")
+    logger.debug("escrito %d chars a %s", len(final_markdown), output)
 
 
-def _resolve_pages(
-    path: Path, spec: str, offset: int = 0
-) -> tuple[Path, Path]:
+def _resolve_pages(path: Path, spec: str, offset: int = 0) -> tuple[Path, Path]:
     """Parsea ``--pages`` contra el PDF en ``path`` y devuelve (target, temp).
 
     ``offset`` desplaza cada número del spec antes de parsear
@@ -309,9 +349,7 @@ def _resolve_pages(
     return temp, temp
 
 
-def _resolve_chapter(
-    path: Path, spec: str, offset: int = 0
-) -> tuple[Path, Path]:
+def _resolve_chapter(path: Path, spec: str, offset: int = 0) -> tuple[Path, Path]:
     """Hace lookup del capítulo en el outline y devuelve (target, temp).
 
     ``offset`` desplaza el rango resuelto del capítulo antes de slicear.
@@ -409,6 +447,96 @@ def _report_timing(result: Any) -> None:
     _stderr.print(f"[dim]{' · '.join(parts)}[/dim]")
 
 
+def _parse_clean_list(spec: str | None) -> tuple[str, ...]:
+    """Parsea una lista separada por comas a tupla de nombres trimmed."""
+    if not spec:
+        return ()
+    return tuple(s.strip() for s in spec.split(",") if s.strip())
+
+
+def _apply_clean_pipeline(
+    raw_markdown: str,
+    *,
+    no_clean: bool,
+    only_clean: str | None,
+    skip_clean: str | None,
+    target_path: Path,
+) -> str:
+    """Aplica el pipeline de cleaners al markdown crudo.
+
+    ``--no-clean`` devuelve el input intacto. ``--only-clean`` y
+    ``--skip-clean`` filtran el pipeline por defecto. Construye un
+    ``CleanContext`` mínimo a partir de la ruta de salida.
+    """
+    if no_clean:
+        return raw_markdown
+
+    from capmd.clean.context import CleanContext
+    from capmd.clean.pipeline import default_pipeline, filter_pipeline
+    from capmd.models import SourceDoc
+
+    pipeline = default_pipeline()
+    try:
+        pipeline = filter_pipeline(
+            pipeline,
+            only=_parse_clean_list(only_clean),
+            skip=_parse_clean_list(skip_clean),
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    suffix = target_path.suffix.lstrip(".").lower() or "pdf"
+    format_str: str = suffix if suffix in ("pdf", "epub", "docx", "pptx", "xlsx") else "other"
+    source_doc = SourceDoc(
+        path=target_path,
+        format=format_str,  # type: ignore[arg-type]
+        sha256="0" * 64,
+        size_bytes=0,
+    )
+    ctx = CleanContext(source=source_doc, format=format_str)  # type: ignore[arg-type]
+    final_markdown, _stats = pipeline.run(raw_markdown, ctx)
+    return final_markdown
+
+
+def _apply_clean_pipeline_to_stdin(
+    raw_markdown: str,
+    *,
+    no_clean: bool,
+    only_clean: str | None,
+    skip_clean: str | None,
+    ext: str,
+) -> str:
+    """Variante para stdin: usa un path placeholder en ``SourceDoc``."""
+    if no_clean:
+        return raw_markdown
+
+    from capmd.clean.context import CleanContext
+    from capmd.clean.pipeline import default_pipeline, filter_pipeline
+    from capmd.models import SourceDoc
+
+    pipeline = default_pipeline()
+    try:
+        pipeline = filter_pipeline(
+            pipeline,
+            only=_parse_clean_list(only_clean),
+            skip=_parse_clean_list(skip_clean),
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    format_str: str = ext if ext in ("pdf", "epub", "docx", "pptx", "xlsx") else "other"
+    placeholder_path = Path(f"<stdin>.{ext}")
+    source_doc = SourceDoc(
+        path=placeholder_path,
+        format=format_str,  # type: ignore[arg-type]
+        sha256="0" * 64,
+        size_bytes=0,
+    )
+    ctx = CleanContext(source=source_doc, format=format_str)  # type: ignore[arg-type]
+    final_markdown, _stats = pipeline.run(raw_markdown, ctx)
+    return final_markdown
+
+
 @app.command(name="toc")
 @_handle_capmd_errors
 def toc(
@@ -452,9 +580,7 @@ def toc(
         chapters = infer_ranges(chapters, total_pages=total_pages)
 
     if json_output:
-        payload = chapters_to_json_dict(
-            source, chapters, total_pages=total_pages
-        )
+        payload = chapters_to_json_dict(source, chapters, total_pages=total_pages)
         typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 

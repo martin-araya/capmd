@@ -117,9 +117,7 @@ def slice_epub(src: Path, chapter: Chapter) -> Path:
     book = _open_book(src)
     idrefs = _spine_chapter_idrefs(book)
     if chapter.index < 1 or chapter.index > len(idrefs):
-        raise ValueError(
-            f"índice {chapter.index} fuera de rango (spine tiene {len(idrefs)})"
-        )
+        raise ValueError(f"índice {chapter.index} fuera de rango (spine tiene {len(idrefs)})")
     idref = idrefs[chapter.index - 1]
     item = book.get_item_with_id(idref)
     assert item is not None

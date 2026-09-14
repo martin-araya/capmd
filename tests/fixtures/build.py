@@ -74,7 +74,14 @@ def _draw_header_footer(c: canvas_module.Canvas, text: str) -> None:
 
 
 def build_header_footer_pdf(out_path: Path) -> Path:
-    """PDF con el mismo header/footer en cada página (target de D4)."""
+    """PDF con el mismo header/footer en cada página (target de D4).
+
+    Genera 4 páginas forzando saltos con ``PageBreak``. Cada página
+    lleva el header centrado ``Capítulo 3 | Rust in Action`` y el
+    footer centrado ``— N —``.
+    """
+    from reportlab.platypus import PageBreak
+
     text = "Capítulo 3 | Rust in Action"
 
     def _on(c: canvas_module.Canvas, doc: SimpleDocTemplate) -> None:
@@ -87,11 +94,17 @@ def build_header_footer_pdf(out_path: Path) -> Path:
         onLaterPages=_on,
     )
     styles = getSampleStyleSheet()
-    body = Paragraph("Body " * 80, styles["BodyText"])
+    body = Paragraph(
+        "Body text to fill the page so D4 has multiple pages with "
+        "repeated headers and footers to detect. " * 20,
+        styles["BodyText"],
+    )
     story = []
     for label in ("A", "B", "C", "D"):
         story.append(Paragraph(f"Section {label}", styles["Heading1"]))
         story.append(body)
+        if label != "D":
+            story.append(PageBreak())
     doc.build(story)
     return out_path
 

@@ -40,10 +40,7 @@ class _TokenParser:
     def _parse(self) -> None:
         parts = self.raw.split("-")
         if len(parts) > 2:
-            raise ValueError(
-                f"demasiados '-' en {self.raw!r}: se esperaba 'N', 'A-B', "
-                f"'A-' o '-B'"
-            )
+            raise ValueError(f"demasiados '-' en {self.raw!r}: se esperaba 'N', 'A-B', 'A-' o '-B'")
 
         if len(parts) == 1:
             self._set_both(parts[0], parts[0])
@@ -54,8 +51,7 @@ class _TokenParser:
         left, right = parts
         if not left and not right:
             raise ValueError(
-                f"rango abierto en ambos lados {self.raw!r}: se esperaba "
-                f"'A-B', 'A-' o '-B'"
+                f"rango abierto en ambos lados {self.raw!r}: se esperaba 'A-B', 'A-' o '-B'"
             )
 
         if left:
@@ -100,9 +96,7 @@ class _TokenParser:
         """
         assert self.start is not None and self.end is not None
         if self.end < self.start:
-            raise ValueError(
-                f"rango descendente en {self.raw!r}: {self.start} > {self.end}"
-            )
+            raise ValueError(f"rango descendente en {self.raw!r}: {self.start} > {self.end}")
         opens_left = self.raw.startswith("-")
         opens_right = self.raw.endswith("-")
         start = 1 if opens_left else self.start
@@ -179,11 +173,8 @@ def translate_spec(spec: str, offset: int) -> str:
             try:
                 shifted = int(part) + offset
             except ValueError as exc:
-                raise ValueError(
-                    f"invalid page spec {spec!r}: número no entero {part!r}"
-                ) from exc
+                raise ValueError(f"invalid page spec {spec!r}: número no entero {part!r}") from exc
             new_parts.append(str(shifted))
         translated_tokens.append("-".join(new_parts))
 
     return ",".join(translated_tokens)
-

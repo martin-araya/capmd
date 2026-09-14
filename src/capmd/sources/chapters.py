@@ -32,9 +32,7 @@ def resolve_chapter(chapters: list[Chapter], spec: str) -> Chapter:
     spec = spec.strip()
 
     if not chapters:
-        raise ValueError(
-            "el PDF no tiene outline; usá --pages para especificar el rango"
-        )
+        raise ValueError("el PDF no tiene outline; usá --pages para especificar el rango")
 
     idx = _try_int(spec)
     if idx is not None:
