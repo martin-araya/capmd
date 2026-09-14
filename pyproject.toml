@@ -1,0 +1,91 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "capmd"
+version = "0.1.0"
+description = "Recorta el capítulo de un libro y lo deja en Markdown limpio, listo para resumir y estudiar."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "capmd contributors" },
+]
+keywords = ["markdown", "pdf", "epub", "ebook", "markitdown", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Text Processing :: Markup :: Markdown",
+]
+dependencies = [
+  "typer>=0.12.3",
+  "markitdown[pdf,docx,pptx,xlsx]>=0.1.7",
+  "pypdf>=4.0",
+  "pypdfium2>=4.0",
+  "ebooklib>=0.18",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "reportlab>=4.0",
+  "pillow>=10.0",
+]
+
+[project.scripts]
+capmd = "capmd.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/<tu-usuario>/capmd"
+Issues = "https://github.com/<tu-usuario>/capmd/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/capmd"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/capmd", "README.md", "roadmap.md", "agent.md", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+files = ["src/capmd"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = "capmd.models"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "ebooklib"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
