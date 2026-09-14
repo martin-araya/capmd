@@ -31,6 +31,7 @@ dependencies = [
   "pypdf>=4.0",
   "pypdfium2>=4.0",
   "ebooklib>=0.18",
+  "symspellpy>=6.7",
 ]
 
 [project.optional-dependencies]
@@ -53,6 +54,9 @@ Issues = "https://github.com/<tu-usuario>/capmd/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/capmd"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/capmd/clean/data" = "capmd/clean/data"
+
 [tool.hatch.build.targets.sdist]
 include = ["src/capmd", "README.md", "roadmap.md", "agent.md", "pyproject.toml"]
 
@@ -67,6 +71,20 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B011"]
+"src/capmd/clean/_ligatures.py" = ["RUF001", "RUF002", "RUF003"]
+"src/capmd/clean/_quotes.py" = ["RUF001", "RUF002", "RUF003"]
+"src/capmd/clean/whitespace.py" = ["RUF002"]
+"src/capmd/clean/hyphens.py" = ["RUF002"]
+"src/capmd/clean/page_numbers.py" = ["RUF001", "RUF002", "RUF003"]
+"src/capmd/clean/lists.py" = ["RUF001", "RUF002", "RUF003"]
+"src/capmd/clean/footnotes.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_ligatures.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_quotes.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_whitespace.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_hyphens.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_page_numbers.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_lists.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_clean_footnotes.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -83,7 +101,7 @@ module = "capmd.models"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pypdfium2", "ebooklib"]
+module = ["pypdfium2", "ebooklib", "symspellpy"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

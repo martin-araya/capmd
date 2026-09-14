@@ -193,63 +193,63 @@ Salida machine-readable del índice, para poder scriptear conversiones masivas.
 
 Cada cleaner es una función pura `str -> str` (o `list[str] -> list[str]` sobre líneas) registrada en `clean/pipeline.py` con un orden explícito y activable/desactivable por config.
 
-**D1. Pipeline configurable**
+**D1. Pipeline configurable** ✅
 `Pipeline([...cleaners])` con `run(md, ctx) -> (md, list[CleanerStat])`, donde cada cleaner reporta cuántos cambios hizo.
 *Test:* pipeline vacío devuelve el input intacto; con dos cleaners se aplican en orden.
 
-**D2. Normalización de whitespace**
+**D2. Normalización de whitespace** ✅
 Colapsar 3+ saltos de línea, trailing spaces, normalizar unicode (NFC), reemplazar ligaduras (`ﬁ`, `ﬂ`) y comillas tipográficas raras.
 *Test:* input con 6 saltos y ligaduras sale normalizado.
 
-**D3. De-hyphenation**
+**D3. De-hyphenation** ✅
 Unir `pala-\nbra` → `palabra`, pero **no** romper compuestos legítimos (`well-known` al final de línea). Heurística: unir solo si la unión existe como palabra o si la segunda parte empieza en minúscula.
 *Test:* casos positivos y negativos del fixture, incluidos términos técnicos.
 
-**D4. Header/footer repetidos**
+**D4. Header/footer repetidos** ✅
 Detectar líneas que aparecen en ≥60% de las páginas en posición inicial/final y eliminarlas. Requiere marcar los límites de página antes de convertir (ver D5).
 *Test:* fixture con "Capítulo 3 | Rust in Action" en cada página → 0 ocurrencias en el output.
 
-**D5. Marcadores de página**
+**D5. Marcadores de página** ✅
 Convertir cada página a markdown por separado (o insertar centinelas `<!-- page N -->`) para que D4, las imágenes y las citas sepan de qué página vienen. Opción `--page-markers` para conservarlos en el output final.
 *Test:* el número de centinelas coincide con el número de páginas recortadas.
 
-**D6. Números de página sueltos**
+**D6. Números de página sueltos** ✅
 Líneas que son solo un número, o `— 47 —`, o `47 | Capítulo 3`.
 *Test:* eliminados sin tocar listas numeradas ni referencias tipo "ver página 47".
 
-**D7. Reconstrucción de headings**
+**D7. Reconstrucción de headings** ✅
 Usar tamaño/peso de fuente de pypdfium2 para clasificar líneas en H1–H4, y mapear a `#`/`##`/`###`. Fallback: regex de patrones (`^\d+\.\d+\s+[A-Z]`).
 *Test:* fixture de headings produce la jerarquía exacta esperada.
 
-**D8. Un solo H1**
+**D8. Un solo H1** ✅
 Forzar que el H1 sea el título del capítulo y degradar cualquier otro H1 a H2 (y así en cascada).
 *Test:* documento con 3 H1 sale con 1 H1 y 2 H2.
 
-**D9. Bloques de código**
+**D9. Bloques de código** ✅
 Detectar listings por fuente monoespaciada o por indentación consistente, envolver en ``` con lenguaje inferido (heurística por keywords: `fn`, `let mut` → rust; `func` → go; `def` → python).
 *Test:* fixture con snippets de Rust y Python queda con los fences y el lenguaje correcto.
 
-**D10. Preservar indentación dentro de código**
+**D10. Preservar indentación dentro de código** ✅
 Que los cleaners de whitespace no toquen el interior de los fences.
 *Test:* snippet de 4 niveles de indentación sobrevive intacto al pipeline completo.
 
-**D11. Listas**
+**D11. Listas** ✅
 Reparar viñetas rotas (`•`, `‣`, `–` al inicio) y listas numeradas partidas en párrafos.
 *Test:* fixture con lista de 5 items sale como lista markdown de 5 items.
 
-**D12. Tablas**
+**D12. Tablas** ✅
 markitdown ya intenta tablas en docx/xlsx; para PDF, detectar filas alineadas y armar tabla GFM, o si la confianza es baja, dejar el texto en un bloque y marcarlo con `<!-- tabla no estructurada -->`.
 *Test:* tabla simple del fixture → tabla GFM válida; tabla compleja → marcada, no inventada.
 
-**D13. Footnotes**
+**D13. Footnotes** ✅
 Detectar marcadores `¹`/`[1]` y el bloque de notas al pie, moverlos a formato `[^1]` al final del documento.
 *Test:* 3 notas del fixture quedan enlazadas y sin duplicar.
 
-**D14. Cortes de párrafo**
+**D14. Cortes de párrafo** ✅
 Unir líneas que forman un mismo párrafo (rotas por ancho de columna) sin unir párrafos distintos. Señal: línea que no termina en `.`/`:`/`;` y la siguiente empieza en minúscula.
 *Test:* párrafo de 8 líneas del fixture queda en una sola línea lógica.
 
-**D15. Flags de control**
+**D15. Flags de control** ✅
 `--no-clean`, `--only-clean headers,hyphens`, `--skip-clean tables`.
 *Test:* `--no-clean` produce byte a byte lo mismo que `--keep-raw`.
 
