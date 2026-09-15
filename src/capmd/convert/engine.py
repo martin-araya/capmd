@@ -54,17 +54,26 @@ def _normalize_extension(extension: str) -> str:
 
 
 class Engine:
-    """Adaptador estable sobre :class:`MarkItDown`.
+    """Adaptador estable sobre :class:`markitdown.MarkItDown`.
 
     Parameters
     ----------
     enable_plugins:
         Pasa a ``MarkItDown(enable_plugins=...)``. Default ``False``.
-        B1 no necesita plugins; E6 los activará.
+        B1 no necesita plugins; E6 los activa cuando hay ``llm_client``.
     limits:
         :class:`ConversionLimits` a aplicar a cada conversión. Si es
         ``None``, se usan los defaults de B5 (500 MB / 5000 páginas /
         600 s / aviso a 500 páginas).
+    llm_client:
+        Cliente LLM para describir imágenes (E6). Si se setea,
+        ``enable_plugins`` se fuerza a ``True`` automáticamente porque
+        ``markitdown-ocr`` requiere plugins activos. Si es ``None``,
+        no se hace descripción de imágenes vía LLM.
+    llm_model:
+        Modelo a usar con ``llm_client`` (E6). Si es ``None`` y hay
+        ``llm_client``, se usa el default del proveedor
+        (configurado en :mod:`capmd.llm`).
     """
 
     def __init__(
@@ -72,9 +81,25 @@ class Engine:
         *,
         enable_plugins: bool = False,
         limits: ConversionLimits | None = None,
+        llm_client: Any = None,
+        llm_model: str | None = None,
     ) -> None:
-        self._md = MarkItDown(enable_plugins=enable_plugins)
+        # Forzar plugins activos cuando hay cliente LLM.
+        plugins = enable_plugins or llm_client is not None
+        self._md = MarkItDown(
+            enable_plugins=plugins,
+            llm_client=llm_client,
+            llm_model=llm_model,
+        )
         self._limits = limits if limits is not None else DEFAULT_LIMITS
+        self._llm_client = llm_client
+        self._llm_model = llm_model
+        self._plugins = plugins
+
+    @property
+    def llm_enabled(self) -> bool:
+        """True si el Engine tiene un cliente LLM configurado (E6)."""
+        return self._llm_client is not None
 
     def supported_formats(self) -> list[str]:
         """Extensiones soportadas (sin punto, ordenadas). Para help y mensajes."""

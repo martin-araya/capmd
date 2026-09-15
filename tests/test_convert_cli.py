@@ -122,6 +122,18 @@ def test_convert_stdin_tty_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
             warn_pages=None,
             pages=None,
             chapter=None,
+            page_offset=0,
+            image_format="png",
+            image_max_width=None,
+            filter_min_size=None,
+            filter_repeat_threshold=None,
+            filter_background_coverage=None,
+            no_anchor=False,
+            page_markers=False,
+            describe_images=False,
+            describe_provider="auto",
+            describe_model=None,
+            no_images=False,
         )
 
     assert excinfo.value.exit_code == 2
@@ -348,9 +360,7 @@ def test_convert_pages_open_right(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--pages", "2-", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--pages", "2-", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "Chapter 2: Ownership" in text
@@ -363,9 +373,7 @@ def test_convert_pages_open_left(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--pages", "-2", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--pages", "-2", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "Chapter 1" in text
@@ -378,9 +386,7 @@ def test_convert_pages_list(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--pages", "1,3", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--pages", "1,3", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "Chapter 1" in text
@@ -432,9 +438,7 @@ def test_convert_chapter_by_index_slices_correct_range(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "3", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--chapter", "3", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "Chapter 2: Ownership" in text
@@ -447,9 +451,7 @@ def test_convert_chapter_by_title_slices_correct_range(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "Ownership", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--chapter", "Ownership", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "Chapter 2: Ownership" in text
@@ -464,12 +466,8 @@ def test_convert_chapter_both_forms_produce_same_output(tmp_path: Path) -> None:
     out_sub = tmp_path / "by_substring.md"
     runner = CliRunner()
 
-    r1 = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "3", "-o", str(out_idx)]
-    )
-    r2 = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "Ownership", "-o", str(out_sub)]
-    )
+    r1 = runner.invoke(app, ["convert", str(pdf), "--chapter", "3", "-o", str(out_idx)])
+    r2 = runner.invoke(app, ["convert", str(pdf), "--chapter", "Ownership", "-o", str(out_sub)])
     assert r1.exit_code == 0, r1.stderr
     assert r2.exit_code == 0, r2.stderr
     assert out_idx.read_text(encoding="utf-8") == out_sub.read_text(encoding="utf-8")
@@ -478,9 +476,7 @@ def test_convert_chapter_both_forms_produce_same_output(tmp_path: Path) -> None:
 def test_convert_chapter_and_pages_rejected(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "3", "--pages", "2-3"]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--chapter", "3", "--pages", "2-3"])
     assert result.exit_code == 2
     assert "mutuamente excluyentes" in result.stderr
 
@@ -537,9 +533,7 @@ def test_convert_chapter_with_subentry_index(tmp_path: Path) -> None:
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "2", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--chapter", "2", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "1.1 Background" in text
@@ -628,9 +622,7 @@ def test_convert_pages_negative_offset(tmp_path: Path) -> None:
 def test_convert_pages_offset_out_of_bounds_exits_4(tmp_path: Path) -> None:
     pdf = _build_numbered_pdf(tmp_path / "p.pdf", n_pages=100)
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--pages", "90", "--page-offset", "18"]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--pages", "90", "--page-offset", "18"])
     assert result.exit_code == 4
     assert "fuera del documento" in result.stderr
 
@@ -639,9 +631,7 @@ def test_convert_chapter_offset_out_of_bounds_exits_4(tmp_path: Path) -> None:
     """Capítulo cuyo offset sale del documento → exit 4."""
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "1", "--page-offset", "18"]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--chapter", "1", "--page-offset", "18"])
     assert result.exit_code == 4
     assert "offset" in result.stderr.lower() or "fuera" in result.stderr
 
@@ -669,9 +659,7 @@ def test_convert_offset_without_pages_or_chapter_silent(tmp_path: Path) -> None:
     pdf = _build_numbered_pdf(tmp_path / "p.pdf", n_pages=5)
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--page-offset", "5", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--page-offset", "5", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     # Sin recorte, todas las páginas aparecen.
@@ -696,9 +684,7 @@ def test_convert_chapter_uses_heuristic_when_outline_empty(tmp_path: Path) -> No
     pdf = build.build_no_outline_chapters_pdf(tmp_path / "no_outline.pdf")
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(pdf), "--chapter", "1", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(pdf), "--chapter", "1", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "Chapter 1: Getting Started" in text
@@ -746,9 +732,7 @@ def test_convert_epub_chapter_by_index(tmp_path: Path) -> None:
     epub_path = _epub(tmp_path)
     out = tmp_path / "out.md"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(epub_path), "--chapter", "2", "-o", str(out)]
-    )
+    result = runner.invoke(app, ["convert", str(epub_path), "--chapter", "2", "-o", str(out)])
     assert result.exit_code == 0, result.stderr
     text = out.read_text(encoding="utf-8")
     assert "MARKER-CH-2-CONTENT" in text
@@ -781,9 +765,7 @@ def test_convert_epub_pages_rejected(tmp_path: Path) -> None:
 def test_convert_epub_page_offset_rejected(tmp_path: Path) -> None:
     epub_path = _epub(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["convert", str(epub_path), "--chapter", "1", "--page-offset", "5"]
-    )
+    result = runner.invoke(app, ["convert", str(epub_path), "--chapter", "1", "--page-offset", "5"])
     assert result.exit_code == 2
     assert "EPUB" in result.stderr
 
