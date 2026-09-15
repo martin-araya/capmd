@@ -9,7 +9,13 @@ from typer.testing import CliRunner
 
 from capmd.cli import app
 from capmd.convert import Engine
+from capmd.output.frontmatter import strip_existing_front_matter
 from tests.fixtures import build
+
+
+def _body(text: str) -> str:
+    """Devuelve el markdown sin el bloque front matter YAML inicial (F2)."""
+    return strip_existing_front_matter(text)
 
 
 @pytest.fixture
@@ -25,7 +31,12 @@ def pdf_path(tmp_path: Path) -> Path:
 def test_no_clean_byte_to_byte_same_as_keep_raw(
     runner: CliRunner, tmp_path: Path, pdf_path: Path
 ) -> None:
-    """Caso literal del roadmap: --no-clean produce byte-a-byte lo mismo que --keep-raw."""
+    """Caso del roadmap (D15/F2): --no-clean produce el mismo cuerpo markdown que --keep-raw.
+
+    A partir de F2 el archivo de ``-o`` lleva un bloque YAML de front
+    matter arriba; el snapshot ``.capmd/raw.md`` de ``--keep-raw`` no.
+    Comparamos entonces los *cuerpos* (post-strip del front matter).
+    """
     out_no_clean = tmp_path / "no_clean.md"
     out_dir = tmp_path / "raw_out"
     out_dir.mkdir()
@@ -49,20 +60,23 @@ def test_no_clean_byte_to_byte_same_as_keep_raw(
     )
     assert r2.exit_code == 0, r2.output
 
-    no_clean_output = out_no_clean.read_text(encoding="utf-8")
-    raw_output = raw_snapshot.read_text(encoding="utf-8")
-    assert no_clean_output == raw_output
+    no_clean_body = _body(out_no_clean.read_text(encoding="utf-8"))
+    raw_body = _body(raw_snapshot.read_text(encoding="utf-8"))
+    assert no_clean_body == raw_body
 
 
 def test_no_clean_output_unchanged_from_engine(
     runner: CliRunner, tmp_path: Path, pdf_path: Path
 ) -> None:
-    """El output de --no-clean es el mismo que el engine produce sin cleaning."""
+    """El cuerpo de --no-clean es el mismo que el engine produce sin cleaning.
+
+    El archivo lleva front matter (F2) arriba; solo comparamos el cuerpo.
+    """
     raw_engine = Engine().convert_path(pdf_path).markdown
     out = tmp_path / "out.md"
     r = runner.invoke(app, ["convert", str(pdf_path), "-o", str(out), "--no-clean"])
     assert r.exit_code == 0, r.output
-    assert out.read_text(encoding="utf-8") == raw_engine
+    assert _body(out.read_text(encoding="utf-8")) == raw_engine
 
 
 def test_no_clean_and_keep_raw_compatible(
@@ -83,7 +97,7 @@ def test_no_clean_and_keep_raw_compatible(
     assert r.exit_code == 0, r.output
     snap = tmp_path / ".capmd" / "raw.md"
     assert snap.exists()
-    assert out.read_text(encoding="utf-8") == snap.read_text(encoding="utf-8")
+    assert _body(out.read_text(encoding="utf-8")) == snap.read_text(encoding="utf-8")
 
 
 def test_only_clean_runs_specified_only(runner: CliRunner, tmp_path: Path, pdf_path: Path) -> None:
