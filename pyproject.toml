@@ -30,6 +30,7 @@ dependencies = [
   "markitdown[pdf,docx,pptx,xlsx]>=0.1.7",
   "pypdf>=4.0",
   "pypdfium2>=4.0",
+  "pyyaml>=6.0",
   "pillow>=10.0",
   "ebooklib>=0.18",
   "symspellpy>=6.7",
@@ -101,7 +102,7 @@ module = "capmd.models"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pypdfium2", "ebooklib", "symspellpy", "tomllib", "google", "google.genai", "anthropic", "openai"]
+module = ["pypdfium2", "ebooklib", "symspellpy", "tomllib", "google", "google.genai", "anthropic", "openai", "yaml"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
