@@ -26,6 +26,7 @@ __all__ = [
     "ALL_BUILDERS",
     "build_cut_hyphens_pdf",
     "build_epub_with_3_chapters",
+    "build_four_h2_pdf",
     "build_header_footer_pdf",
     "build_headings_pdf",
     "build_logo_repeated_pdf",
@@ -33,6 +34,7 @@ __all__ = [
     "build_no_outline_chapters_pdf",
     "build_outline_toc_pdf",
     "build_outline_with_chapter_image_pdf",
+    "build_scanned_pdf",
     "build_table_pdf",
     "build_text_with_midpage_image_pdf",
     "build_two_images_pdf",
@@ -62,6 +64,40 @@ def build_headings_pdf(out_path: Path) -> Path:
         Paragraph("Ownership content.", styles["BodyText"]),
         Paragraph("2.1 Borrowing", styles["Heading2"]),
         Paragraph("Borrowing content.", styles["BodyText"]),
+    ]
+    doc.build(story)
+    return out_path
+
+
+def build_four_h2_pdf(out_path: Path) -> Path:
+    """PDF con 4 H2 explícitos para F4 (``--split h2`` produce 4 archivos).
+
+    Estructura::
+
+        H1: Chapter 1: Introduction
+        H2: 1.1 Motivation
+        H2: 1.2 Installation
+        H2: 1.3 Traits
+        H2: 1.4 Lifetimes
+
+    Solo 1 H1 (para que el ``single_h1_cleaner`` D8 no degrade un
+    segundo H1 a H2). Sin contenido entre el H1 y el primer H2 (sin
+    prelude), para que el split produzca **exactamente 4 archivos**
+    + ``index.md`` (sin ``00-intro.md``), tal como exige el literal
+    del roadmap.
+    """
+    doc = SimpleDocTemplate(str(out_path), pagesize=LETTER)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Chapter 1: Introduction", styles["Heading1"]),
+        Paragraph("1.1 Motivation", styles["Heading2"]),
+        Paragraph("Motivation content.", styles["BodyText"]),
+        Paragraph("1.2 Installation", styles["Heading2"]),
+        Paragraph("Installation content.", styles["BodyText"]),
+        Paragraph("1.3 Traits", styles["Heading2"]),
+        Paragraph("Traits content.", styles["BodyText"]),
+        Paragraph("1.4 Lifetimes", styles["Heading2"]),
+        Paragraph("Lifetimes content.", styles["BodyText"]),
     ]
     doc.build(story)
     return out_path
@@ -557,6 +593,44 @@ def build_epub_with_3_chapters(out_path: Path) -> Path:
     return out_path
 
 
+def build_scanned_pdf(out_path: Path, n_pages: int = 3) -> Path:
+    """PDF con N páginas que solo contienen imágenes (sin texto).
+
+    Simula un PDF escaneado: markitdown devuelve markdown casi vacío
+    porque no hay texto embebido; solo pixeles. Usado por F6 para
+    disparar los heurísticos ``empty_output`` y ``scanned_pdf``.
+
+    Usa ``reportlab.canvas`` directo (no platypus) para evitar que el
+    layout agregue texto de paginación. Cada página es un cuadrado
+    blanco generado con PIL.
+    """
+    work_dir = out_path.parent / f".scanned_{out_path.stem}"
+    work_dir.mkdir(exist_ok=True)
+    colors = [
+        (240, 240, 240),
+        (200, 220, 240),
+        (240, 220, 200),
+    ]
+    c = canvas_module.Canvas(str(out_path), pagesize=LETTER)
+    for i in range(n_pages):
+        png_path = work_dir / f"page_{i + 1}.png"
+        Image.new("RGB", (800, 600), colors[i % len(colors)]).save(
+            png_path, format="PNG"
+        )
+        c.drawImage(
+            str(png_path),
+            0,
+            0,
+            width=LETTER[0],
+            height=LETTER[1],
+            preserveAspectRatio=False,
+            mask="auto",
+        )
+        c.showPage()
+    c.save()
+    return out_path
+
+
 ALL_BUILDERS = [
     build_headings_pdf,
     build_header_footer_pdf,
@@ -569,5 +643,6 @@ ALL_BUILDERS = [
     build_epub_with_3_chapters,
     build_logo_repeated_pdf,
     build_outline_with_chapter_image_pdf,
+    build_scanned_pdf,
     build_text_with_midpage_image_pdf,
 ]
