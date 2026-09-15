@@ -1,12 +1,8 @@
-"""Tests del comando `capmd toc` (fase C2).
-
-Cubre: títulos en stdout, start_page correcto, indentación por nivel,
-archivo faltante (exit 2), PDF sin outline (vacío), y separación
-stdout/stderr (regla 4 de agent.md).
-"""
+"""Tests e2e del TOC inline (F5)."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -14,281 +10,190 @@ from typer.testing import CliRunner
 from capmd.cli import app
 from tests.fixtures import build
 
-
-def _outline_pdf(tmp_path: Path) -> Path:
-    return build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
+# --- helpers --------------------------------------------------------------
 
 
-def test_toc_prints_chapter_titles_in_order(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path))])
-
-    assert result.exit_code == 0, result.stderr
-    stdout = result.stdout
-    for title in (
-        "Chapter 1: Getting Started",
-        "1.1 Background",
-        "Chapter 2: Ownership",
-        "Chapter 3: Borrowing",
-    ):
-        assert title in stdout, f"falta {title!r} en stdout:\n{stdout}"
+def _runner() -> CliRunner:
+    return CliRunner()
 
 
-def test_toc_prints_start_pages(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path))])
-
-    assert result.exit_code == 0, result.stderr
-    stdout = result.stdout
-    # Las páginas del fixture son 1, 1, 2, 3 (1-indexed). Verificar que
-    # aparecen y, sobre todo, que NO aparece el "0" que devolvería
-    # pypdf si perdiéramos el +1 de C1. A partir de C3 el display es
-    # ``(p. X-Y)`` cuando hay rango inferido.
-    assert "(p. 1-1)" in stdout
-    assert "(p. 2-2)" in stdout
-    assert "(p. 3-3)" in stdout
-    assert "(p. 0" not in stdout
+def _chapter_md_of(out_dir: Path) -> Path:
+    """Devuelve el path del chapter ``.md`` dentro de ``out_dir``."""
+    matches = list(out_dir.rglob("*.md"))
+    matches = [p for p in matches if "sections" not in p.parts]
+    assert matches, f"no se encontró chapter .md en {out_dir}"
+    return matches[0]
 
 
-def test_toc_indents_by_level(tmp_path: Path) -> None:
-    """``1.1 Background`` aparece entre Chapter 1 y Chapter 2 en stdout."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path))])
-
-    assert result.exit_code == 0, result.stderr
-    stdout = result.stdout
-    i_ch1 = stdout.index("Chapter 1: Getting Started")
-    i_sub = stdout.index("1.1 Background")
-    i_ch2 = stdout.index("Chapter 2: Ownership")
-    assert i_ch1 < i_sub < i_ch2, (
-        f"orden esperado: Ch1 < 1.1 < Ch2; got Ch1={i_ch1}, 1.1={i_sub}, Ch2={i_ch2}"
-    )
+def _sections_dir_of(out_dir: Path) -> Path | None:
+    candidates = list(out_dir.rglob("sections"))
+    return candidates[0] if candidates else None
 
 
-def test_toc_missing_file_exits_2(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(tmp_path / "no-existe.pdf")])
-    assert result.exit_code == 2
-    assert "Error" in result.stderr
-    assert "Traceback" not in result.stderr
+def _four_h2_pdf(tmp_path: Path) -> Path:
+    return build.build_four_h2_pdf(tmp_path / "Rust Handbook.pdf")
 
 
-def test_toc_pdf_without_outline_uses_heuristic(tmp_path: Path) -> None:
-    """C8: sin outline, la heurística detecta headings.
-
-    ``build_headings_pdf`` no tiene outline embebido pero el texto
-    arranca con 'Chapter 1: Introduction' → matchea el patrón y aparece
-    en el TOC.
-    """
-    runner = CliRunner()
-    pdf = build.build_headings_pdf(tmp_path / "headings.pdf")
-    result = runner.invoke(app, ["toc", str(pdf)])
-
-    assert result.exit_code == 0, result.stderr
-    assert "headings.pdf" in result.stdout
-    assert "Chapter 1: Introduction" in result.stdout
+def _section_titles_from_toc(md_text: str) -> list[str]:
+    """Extrae los títulos de la lista dentro del bloque TOC."""
+    m = re.search(r"<!-- capmd:toc:open -->\n(.*?)\n<!-- capmd:toc:close -->", md_text, re.DOTALL)
+    if not m:
+        return []
+    return re.findall(r"- \[(.+)\]\(#([^)]+)\)", m.group(1))
 
 
-# --- C9: EPUB ---------------------------------------------------------------
-
-
-def _epub(tmp_path: Path) -> Path:
-    from tests.fixtures import build
-
-    return build.build_epub_with_3_chapters(tmp_path / "demo.epub")
-
-
-def test_toc_on_epub_lists_chapters(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_epub(tmp_path))])
-    assert result.exit_code == 0, result.stderr
-    for title in ("Capitulo 1", "Capitulo 2", "Capitulo 3"):
-        assert title in result.stdout
-
-
-# --- C10: --json -----------------------------------------------------------
-
-
-def _load_json(stdout: str) -> dict:
-    import json
-
-    return json.loads(stdout)
-
-
-def test_toc_json_emits_valid_json(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    assert result.exit_code == 0, result.stderr
-    # Si falla, AssertionError indica JSON inválido.
-    payload = _load_json(result.stdout)
-    assert isinstance(payload, dict)
-
-
-def test_toc_json_has_required_top_level_keys(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    payload = _load_json(result.stdout)
-    assert set(payload.keys()) == {"source", "total_pages", "chapters"}
-
-
-def test_toc_json_chapters_have_required_keys(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    payload = _load_json(result.stdout)
-    assert len(payload["chapters"]) > 0
-    expected = {"index", "title", "level", "start_page", "end_page_inclusive"}
-    for ch in payload["chapters"]:
-        assert set(ch.keys()) == expected
-
-
-def test_toc_json_chapters_match_outline(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    payload = _load_json(result.stdout)
-    titles = [c["title"] for c in payload["chapters"]]
-    assert titles == [
-        "Chapter 1: Getting Started",
-        "1.1 Background",
-        "Chapter 2: Ownership",
-        "Chapter 3: Borrowing",
-    ]
-    assert payload["source"] == "outline_toc.pdf"
-    assert payload["total_pages"] == 3
-
-
-def test_toc_json_end_page_inclusive_consistency(tmp_path: Path) -> None:
-    """``end_page_inclusive == start_page`` cuando el capítulo ocupa 1 página."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    payload = _load_json(result.stdout)
-    for ch in payload["chapters"]:
-        # En el fixture, cada L1 ocupa una sola página → end = start.
-        assert ch["end_page_inclusive"] >= ch["start_page"]
-
-
-def test_toc_json_does_not_leak_rich_artifacts(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    assert result.exit_code == 0
-    # rich.tree usa estos caracteres; con --json no deben aparecer.
-    for art in ("├──", "│", "└──"):
-        assert art not in result.stdout, f"artifact rich {art!r} en stdout"
-
-
-def test_toc_json_works_on_epub(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_epub(tmp_path)), "--json"])
-    assert result.exit_code == 0, result.stderr
-    payload = _load_json(result.stdout)
-    assert payload["source"] == "demo.epub"
-    titles = [c["title"] for c in payload["chapters"]]
-    assert titles == ["Capitulo 1", "Capitulo 2", "Capitulo 3"]
-
-
-def test_toc_json_help_mentions_json() -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", "--help"])
-    assert result.exit_code == 0
-    assert "--json" in result.stdout
-
-
-def test_toc_jq_chapters_length(tmp_path: Path) -> None:
-    """Simula ``jq '.chapters | length'`` sobre el stdout."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    payload = _load_json(result.stdout)
-    # Equivalente Python de `jq '.chapters | length'`.
-    assert len(payload["chapters"]) == 4
-    # Equivalente Python de `jq '.chapters[] | .level'` (set).
-    levels = {c["level"] for c in payload["chapters"]}
-    assert levels == {1, 2}
-
-
-def test_toc_json_schema_pinned(tmp_path: Path) -> None:
-    """Si alguien cambia las keys del JSON, este test rompe explícitamente."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path)), "--json"])
-    payload = _load_json(result.stdout)
-    # Shape top-level
-    assert set(payload.keys()) == {"source", "total_pages", "chapters"}
-    # Shape chapter
-    assert set(payload["chapters"][0].keys()) == {
-        "index",
-        "title",
-        "level",
-        "start_page",
-        "end_page_inclusive",
+def _section_anchors_in_body(md_text: str) -> set[str]:
+    """Devuelve el set de anchors que el markdown tiene como headings."""
+    return {
+        re.sub(r"[^\w\-]+", "-", t.strip().lower()).strip("-")
+        for t in re.findall(r"(?m)^#{1,6} (.+?)\s*$", md_text)
     }
 
 
-def test_toc_help_mentions_pdf_argument() -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", "--help"])
-    assert result.exit_code == 0
-    assert "PDF" in result.stdout
+# --- Test literal del roadmap F5 ------------------------------------------
 
 
-def test_toc_logs_do_not_leak_into_stdout(tmp_path: Path) -> None:
-    """stdout solo trae el árbol; cualquier log va a stderr."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path))])
-
-    assert result.exit_code == 0
-    assert "INFO:" not in result.stdout
-    assert "DEBUG:" not in result.stdout
-    assert "WARNING:" not in result.stdout
-
-
-# --- C8: fallback heurístico en toc ----------------------------------------
-
-
-def _no_outline_pdf(tmp_path: Path) -> Path:
-    from tests.fixtures import build
-
-    return build.build_no_outline_chapters_pdf(tmp_path / "no_outline.pdf")
-
-
-def test_toc_uses_heuristic_when_outline_empty(tmp_path: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_no_outline_pdf(tmp_path))])
-
+def test_toc_each_anchor_resolves_to_real_heading(tmp_path: Path) -> None:
+    """Test literal F5: cada anchor del TOC existe como heading."""
+    pdf = _four_h2_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    result = _runner().invoke(
+        app, ["convert", str(pdf), "--out", str(out_dir), "--toc"]
+    )
     assert result.exit_code == 0, result.stderr
-    for title in (
-        "Chapter 1: Getting Started",
-        "Chapter 2: Ownership",
-        "Chapter 3: Borrowing",
-    ):
-        assert title in result.stdout, f"falta {title!r} en stdout"
+
+    md_path = _chapter_md_of(out_dir)
+    text = md_path.read_text(encoding="utf-8")
+    toc_entries = _section_titles_from_toc(text)
+    assert len(toc_entries) >= 4, f"esperaba >=4 entradas TOC: {toc_entries}"
+    anchors_in_toc = {anchor for _, anchor in toc_entries}
+    # Cada anchor en la TOC debe corresponder a un heading real en el doc.
+    real_anchors = _section_anchors_in_body(text)
+    assert anchors_in_toc <= real_anchors, (
+        f"anclas en la TOC no resuelven a un heading: {anchors_in_toc - real_anchors}"
+    )
 
 
-def test_toc_clear_error_when_detection_fails(tmp_path: Path) -> None:
-    from reportlab.lib.pagesizes import LETTER
-    from reportlab.pdfgen import canvas as cm
-
-    bad = tmp_path / "uniform.pdf"
-    _, height = LETTER
-    c = cm.Canvas(str(bad), pagesize=LETTER)
-    for n in range(1, 4):
-        c.setFont("Helvetica", 11)
-        c.drawString(72, height - 72, f"Page {n}: same uniform body.")
-        c.showPage()
-    c.save()
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(bad)])
-    assert result.exit_code == 4
-    assert "--pages" in result.stderr
+# --- Comportamiento por defecto -------------------------------------------
 
 
-def test_toc_shows_inferred_range(tmp_path: Path) -> None:
-    """C3: el display muestra ``(p. X-Y)`` cuando ``end_page > start_page``."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["toc", str(_outline_pdf(tmp_path))])
-
+def test_toc_default_depth_includes_h2_and_h3_only(tmp_path: Path) -> None:
+    """Default ``--toc-depth 3`` cubre H2 y H3; no toca H1 ni H4."""
+    pdf = _four_h2_pdf(tmp_path)
+    out_dir = tmp_path / "out_default"
+    result = _runner().invoke(
+        app, ["convert", str(pdf), "--out", str(out_dir), "--toc"]
+    )
     assert result.exit_code == 0, result.stderr
-    # El fixture tiene 3 páginas físicas; los 3 L1 cubren cada una su página.
-    assert "(p. 1-1)" in result.stdout  # Ch1 cubre solo la página 1
-    assert "(p. 2-2)" in result.stdout  # Ch2 cubre solo la página 2
-    assert "(p. 3-3)" in result.stdout  # Ch3 cubre solo la página 3
-    # La sub-entrada 1.1 también queda con rango inferido (cierra en Ch2.start).
-    assert "1.1 Background" in result.stdout
+
+    text = _chapter_md_of(out_dir).read_text(encoding="utf-8")
+    # El H1 chapter title no aparece como entrada del TOC.
+    h1_in_md = re.search(r"(?m)^# (.+)$", text)
+    assert h1_in_md is not None
+    h1_title = h1_in_md.group(1)
+    toc_titles = [t for t, _ in _section_titles_from_toc(text)]
+    assert h1_title not in toc_titles
+
+
+def test_toc_with_minus_o_file(tmp_path: Path) -> None:
+    pdf = _four_h2_pdf(tmp_path)
+    out = tmp_path / "single.md"
+    result = _runner().invoke(
+        app, ["convert", str(pdf), "-o", str(out), "--toc"]
+    )
+    assert result.exit_code == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+    # TOC presente en el archivo escrito.
+    assert "<!-- capmd:toc:open -->" in text
+    toc_entries = _section_titles_from_toc(text)
+    assert len(toc_entries) >= 4
+
+
+def test_toc_with_flat(tmp_path: Path) -> None:
+    pdf = _four_h2_pdf(tmp_path)
+    out_dir = tmp_path / "flat_dir"
+    result = _runner().invoke(
+        app, ["convert", str(pdf), "--out", str(out_dir), "--toc", "--flat"]
+    )
+    assert result.exit_code == 0, result.stderr
+    flat_md = out_dir / "rust-handbook.md"
+    assert flat_md.exists()
+    text = flat_md.read_text(encoding="utf-8")
+    assert "<!-- capmd:toc:open -->" in text
+
+
+def test_toc_with_minus_o_omits_toc_from_stdout(tmp_path: Path) -> None:
+    """Stdout NO debe llevar TOC (mantiene pipes limpios, F2)."""
+    pdf = _four_h2_pdf(tmp_path)
+    result = _runner().invoke(app, ["convert", str(pdf), "--toc"])
+    assert result.exit_code == 0
+    assert "<!-- capmd:toc:open -->" not in result.stdout
+
+
+# --- --split + --toc: TOC solo en chapter root ----------------------------
+
+
+def test_toc_with_split_goes_only_in_chapter_root(tmp_path: Path) -> None:
+    pdf = _four_h2_pdf(tmp_path)
+    out_dir = tmp_path / "out_split"
+    result = _runner().invoke(
+        app,
+        ["convert", str(pdf), "--out", str(out_dir), "--split", "h2", "--toc"],
+    )
+    assert result.exit_code == 0, result.stderr
+
+    # El chapter root debe tener TOC.
+    chap_md = _chapter_md_of(out_dir)
+    chap_text = chap_md.read_text(encoding="utf-8")
+    assert "<!-- capmd:toc:open -->" in chap_text
+
+    # Las secciones NO deben tener TOC (solo FM + body).
+    sections_dir = _sections_dir_of(out_dir)
+    assert sections_dir is not None
+    section_files = sorted(
+        p for p in sections_dir.glob("*.md") if p.name != "index.md"
+    )
+    for sec in section_files:
+        sec_text = sec.read_text(encoding="utf-8")
+        assert "<!-- capmd:toc:open -->" not in sec_text, (
+            f"{sec.name} no debería tener TOC con --split"
+        )
+
+
+# --- Idempotencia --------------------------------------------------------
+
+
+def test_toc_re_running_does_not_duplicate(tmp_path: Path) -> None:
+    """Segunda corrida con --toc no acumula el bloque (sentinels)."""
+    pdf = _four_h2_pdf(tmp_path)
+    out = tmp_path / "idem.md"
+    r1 = _runner().invoke(app, ["convert", str(pdf), "-o", str(out), "--toc"])
+    assert r1.exit_code == 0, r1.stderr
+    text = out.read_text(encoding="utf-8")
+    assert text.count("<!-- capmd:toc:open -->") == 1
+    assert text.count("<!-- capmd:toc:close -->") == 1
+
+
+# --- --toc-depth ----------------------------------------------------------
+
+
+def test_toc_depth_2_only_h2(tmp_path: Path) -> None:
+    pdf = _four_h2_pdf(tmp_path)
+    out_dir = tmp_path / "out_depth2"
+    result = _runner().invoke(
+        app,
+        ["convert", str(pdf), "--out", str(out_dir), "--toc", "--toc-depth", "2"],
+    )
+    assert result.exit_code == 0, result.stderr
+    text = _chapter_md_of(out_dir).read_text(encoding="utf-8")
+    # La fixture produce solo H2; la TOC los incluye (>=1).
+    toc_entries = _section_titles_from_toc(text)
+    assert len(toc_entries) >= 4
+
+
+def test_help_mentions_toc_flag() -> None:
+    """Sanity: el --help menciona --toc y --toc-depth."""
+    result = _runner().invoke(app, ["convert", "--help"])
+    assert result.exit_code == 0
+    assert "--toc" in result.stdout
+    assert "--toc-depth" in result.stdout
