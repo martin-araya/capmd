@@ -68,7 +68,15 @@ def test_convert_help_mentions_output_flag() -> None:
 
 
 def test_convert_stdin_dash_with_ext_matches_file(tmp_path: Path) -> None:
-    """Test literal B4: el pipe produce el mismo output que el archivo."""
+    """Test literal B4: el pipe produce el mismo output que el archivo.
+
+    F2 prepende YAML solo cuando hay ``-o``/``--out``. Ambos lo tienen
+    acá; sin embargo el ``book`` difiere (``headings`` vs ``stdin``),
+    porque stdin no tiene filename. Comparamos entonces los *cuerpos*
+    (post-strip del front matter).
+    """
+    from capmd.output.frontmatter import strip_existing_front_matter
+
     pdf = build.build_headings_pdf(tmp_path / "headings.pdf")
     out_file = tmp_path / "from_file.md"
     out_stdin = tmp_path / "from_stdin.md"
@@ -84,7 +92,9 @@ def test_convert_stdin_dash_with_ext_matches_file(tmp_path: Path) -> None:
 
     assert file_result.exit_code == 0, file_result.stderr
     assert stdin_result.exit_code == 0, stdin_result.stderr
-    assert out_file.read_bytes() == out_stdin.read_bytes()
+    body_file = strip_existing_front_matter(out_file.read_text(encoding="utf-8"))
+    body_stdin = strip_existing_front_matter(out_stdin.read_text(encoding="utf-8"))
+    assert body_file == body_stdin
 
 
 def test_convert_stdin_without_ext_exits_3() -> None:
@@ -134,6 +144,16 @@ def test_convert_stdin_tty_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
             describe_provider="auto",
             describe_model=None,
             no_images=False,
+            split=None,
+            toc=False,
+            toc_depth=3,
+            report_format="json",
+            no_warnings=False,
+            strict=False,
+            dry_run=False,
+            dry_run_format="json",
+            force=False,
+            suffix=False,
         )
 
     assert excinfo.value.exit_code == 2
@@ -207,14 +227,17 @@ def test_convert_default_max_size_accommodates_fixture(tmp_path: Path) -> None:
 
 
 def test_convert_reports_timing_to_stderr(tmp_path: Path) -> None:
+    """El reporte F6 va a stderr con stats del run (incluye elapsed/páginas)."""
     pdf = build.build_headings_pdf(tmp_path / "h.pdf")
     out = tmp_path / "o.md"
     runner = CliRunner()
     result = runner.invoke(app, ["convert", str(pdf), "-o", str(out)], catch_exceptions=False)
     assert result.exit_code == 0, result.stderr
     stderr = result.output if isinstance(result.output, str) else (result.stderr or "")
-    assert "convertido en" in stderr
-    assert "páginas" in stderr
+    # F6 emite un JSON al final con elapsed_seconds + pages (cuando hay pdf).
+    assert '"elapsed_seconds"' in stderr
+    assert '"pages"' in stderr
+    assert '"format": "json"' in stderr
 
 
 def test_convert_max_size_exceeded_exits_6(tmp_path: Path) -> None:
@@ -303,12 +326,17 @@ def test_convert_keep_raw_with_stdin_writes_to_cwd(
 
 
 def test_convert_keep_raw_overwrites_existing_snapshot(tmp_path: Path) -> None:
-    """Una segunda corrida con --keep-raw sobrescribe sin error."""
+    """Una segunda corrida con --keep-raw y ``--force`` sobrescribe sin error."""
     pdf = build.build_headings_pdf(tmp_path / "h.pdf")
     out = tmp_path / "x.md"
     runner = CliRunner()
     runner.invoke(app, ["convert", str(pdf), "-o", str(out), "--keep-raw"])
-    second = runner.invoke(app, ["convert", str(pdf), "-o", str(out), "--keep-raw"])
+    # F8: la 2da corrida sin ``--force`` ahora falla con exit 7.
+    # Agregamos ``--force`` explícitamente para que sobrescriba.
+    second = runner.invoke(
+        app,
+        ["convert", str(pdf), "-o", str(out), "--keep-raw", "--force"],
+    )
     assert second.exit_code == 0, second.stderr
     snapshot = tmp_path / ".capmd" / "raw.md"
     assert snapshot.exists()
