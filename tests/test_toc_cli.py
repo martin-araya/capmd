@@ -61,8 +61,7 @@ def test_toc_indents_by_level(tmp_path: Path) -> None:
     i_sub = stdout.index("1.1 Background")
     i_ch2 = stdout.index("Chapter 2: Ownership")
     assert i_ch1 < i_sub < i_ch2, (
-        f"orden esperado: Ch1 < 1.1 < Ch2; "
-        f"got Ch1={i_ch1}, 1.1={i_sub}, Ch2={i_ch2}"
+        f"orden esperado: Ch1 < 1.1 < Ch2; got Ch1={i_ch1}, 1.1={i_sub}, Ch2={i_ch2}"
     )
 
 

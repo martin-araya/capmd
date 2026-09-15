@@ -70,9 +70,7 @@ def test_slice_epub_tempfile_can_be_unlinked(tmp_path: Path) -> None:
 
 def test_slice_epub_out_of_range_raises(tmp_path: Path) -> None:
     read_outline(_epub(tmp_path))
-    bogus = Chapter(
-        title="x", level=1, start_page=99, end_page=100, index=99
-    )
+    bogus = Chapter(title="x", level=1, start_page=99, end_page=100, index=99)
     with pytest.raises(ValueError, match="fuera de rango"):
         slice_epub(_epub(tmp_path), bogus)
 
