@@ -30,6 +30,7 @@ dependencies = [
   "markitdown[pdf,docx,pptx,xlsx]>=0.1.7",
   "pypdf>=4.0",
   "pypdfium2>=4.0",
+  "pillow>=10.0",
   "ebooklib>=0.18",
   "symspellpy>=6.7",
 ]
@@ -41,7 +42,6 @@ dev = [
   "ruff>=0.5",
   "mypy>=1.10",
   "reportlab>=4.0",
-  "pillow>=10.0",
 ]
 
 [project.scripts]
@@ -101,7 +101,7 @@ module = "capmd.models"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pypdfium2", "ebooklib", "symspellpy"]
+module = ["pypdfium2", "ebooklib", "symspellpy", "tomllib", "google", "google.genai", "anthropic", "openai"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
