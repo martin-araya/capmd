@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from capmd.clean.cleaner import Cleaner, CleanerStat
 from capmd.clean.context import CleanContext
 
-__all__ = ["Pipeline", "default_pipeline", "filter_pipeline"]
+__all__ = ["Pipeline", "available_cleaner_names", "default_pipeline", "filter_pipeline"]
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,16 @@ def _validate_names(
         raise ValueError(
             f"cleaners desconocidos ({kind}): {sorted(unknown)}. Disponibles: {sorted(available)}"
         )
+
+
+def available_cleaner_names() -> tuple[str, ...]:
+    """Nombres de cleaners registrados en :func:`default_pipeline`.
+
+    Single source of truth para validar listas
+    ``cleaners.enabled``/``cleaners.disabled`` del TOML
+    (``capmd.config``) y de ``--only-clean``/``--skip-clean`` en CLI.
+    """
+    return tuple(c.name for c in default_pipeline().cleaners)
 
 
 def filter_pipeline(
