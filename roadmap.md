@@ -257,33 +257,33 @@ Unir líneas que forman un mismo párrafo (rotas por ancho de columna) sin unir 
 
 ### Bloque E — Imágenes y figuras
 
-**E1. Extracción de imágenes**
-`images/extract.py` con pypdfium2: sacar las imágenes embebidas del rango de páginas a PNG/WebP, con `--image-format` y `--image-max-width`.
-*Test:* fixture de 2 imágenes produce 2 archivos con dimensiones correctas.
+**✅ E1. Extracción de imágenes**
+`images/extract.py` con pypdfium2: sacar las imágenes embebidas del rango de páginas a PNG/WebP, con `--image-format` y `--image-max-width`. Activada por default en `capmd convert` cuando el input es PDF; la carpeta `images/` queda junto al `-o` (o en `cwd/images/` si se escribe a stdout).
+*Test:* fixture de 2 imágenes produce 2 archivos (`fig-001.png`, `fig-002.png`) con dimensiones correctas. Cobertura: 13/13 tests verdes en `tests/test_images_extract.py`; bytes exactos coinciden entre dos corridas; `--image-format webp` produce WebP; `--image-max-width 100` reescala con LANCZOS preservando aspect ratio.
 
-**E2. Filtro de basura**
-Descartar imágenes < N px, logos repetidos en todas las páginas, y fondos de página completa.
-*Test:* fixture con logo en cada página extrae solo las figuras reales.
+**✅ E2. Filtro de basura**
+Descartar imágenes < N px, logos repetidos en todas las páginas, y fondos de página completa. Pipeline E1+E2: `extract_candidates → filter_candidates → write_figures`. Defaults: `min_size=64x64`, `repeat_threshold=0.8`, `background_coverage=0.85`. Logo dedup conserva la primera aparición; el resto cae como `LOGO_REPEATED`. Override por CLI (`--filter-min-size`, `--filter-repeat-threshold`, `--filter-background-coverage`) y por TOML (`[images]` en `./capmd.toml` o `~/.config/capmd/config.toml`, precedencia project > global). Nuevo módulo `capmd.config` con `load_image_filter_overrides()` (stub mínimo; G1/G3 ampliarán).
+*Test:* `build_logo_repeated_pdf` (4 páginas con logo idéntico + figuras reales en páginas 2 y 4) produce exactamente 2 archivos PNG por default. 19/19 tests verdes en `tests/test_images_filter.py`, 13/13 tests E1 sin regresión, 921/921 en suite completa.
 
-**E3. Nombres estables**
-`fig-03-01.png` = capítulo 3, figura 1. Determinista entre corridas.
-*Test:* dos ejecuciones seguidas producen exactamente los mismos nombres y hashes.
+**✅ E3. Nombres estables**
+`fig-03-01.png` = capítulo 3, figura 1 (`fig-CC-NN.<ext>` con `:02d` que escala a 3+ dígitos automáticamente). Determinista entre corridas en nombres Y bytes: dos runs consecutivos producen SHA-256 idénticos por archivo (Pillow save con `info={}` limpio + WebP `exif=b""`/`icc_profile=None`). `chapter_index=1` por default, sube al `Chapter.index` resuelto cuando se pasa `--chapter N` (numérico o por substring del título). `Figure.index` ahora es índice dentro del capítulo.
+*Test:* 16/16 tests verdes en `tests/test_images_naming.py`; `test_extract_figures_byte_identical_across_runs` es el caso literal del roadmap (mismos nombres y hashes en dos corridas); coverage del CLI para `--chapter 2`, `--chapter 3`, `--chapter "Ownership"` y default. 937/937 verde en suite completa.
 
-**E4. Anclaje posicional**
-`images/anchor.py`: insertar `![Figura 3.1](images/fig-03-01.png)` en el punto del markdown correspondiente a la posición Y de la imagen en su página.
-*Test:* en el fixture, la imagen de la mitad de la página 2 queda entre los párrafos correctos, no al final del documento.
+**✅ E4. Anclaje posicional**
+`images/anchor.py`: insertar `![](images/fig-CC-NN.png)` (alt vacío, E5 lo completará) en el punto del markdown correspondiente a la posición Y del bbox de la imagen en su página. Estrategia: cuando hay figuras y no se pasa `--no-anchor`, `convert` usa `Engine.convert_pages` + `insert_page_markers` y limpia cada página por separado (los cleaners no son estables con los centinelas insertados), reinserta markers, llama a `anchor_figures` con `page_areas` y luego `strip_page_markers` (a menos que `--page-markers`). Algoritmo de inserción: distribuye las líneas no-vacías de cada página uniformemente; inserta el anchor después de la `floor(y_frac * n_lines)`-ésima línea. Fallbacks: `bbox=None` o `page_height<=0` → final del bloque; figura en página fuera del rango → final del documento con warning. Flag nuevo: `--page-markers` (D5).
+*Test:* el test literal del roadmap es `test_anchor_figures_inserts_image_in_middle_of_page_2` (imagen a Y=0.5 de página 2 → anchor después del párrafo 2 de 4, no al final). `build_text_with_midpage_image_pdf` (fixture nuevo: 2 páginas, narrativa + imagen embedida en Y≈0.37) verifica el caso end-to-end en `test_cli_anchor_inserts_image_in_final_markdown`. 14/14 tests verdes en `tests/test_images_anchor.py`; `--no-anchor` verificado, `--page-markers` verificado, anclaje con `--chapter 2` verificado. 951/951 verde en suite completa.
 
-**E5. Captions**
-Detectar el texto `Figura N.N — ...` bajo la imagen y usarlo como alt text y como línea en cursiva bajo la imagen.
-*Test:* el alt text del output es el caption real del fixture.
+**✅ E5. Captions**
+Detectar el texto `Figura N.N — ...` (o variantes `Figure`, `Fig.`, `Fig`, con separador `—`/`-`/`:`) bajo la imagen y usarlo como alt text del anchor `![…](images/…)` y como línea en cursiva `*Figura N.N — …*` debajo. Regex multi-idioma compilable (`CAPTION_RE`) en `capmd.images.captions`; `find_caption_in_window(lines, target, window=3)` busca en las próximas 3 líneas no-vacías debajo del target del anchor (saltando blank lines). `default_alt_text(fig)` lee `fig.caption or ""` para que el alt text se propague sin tocar el contrato E4. CLI: `_attribute_captions_by_page` hace un pre-pass por página después de limpiar y antes del anchor; matchea por número (`f"{chapter}.{fig.index}"`) con fallback posicional.
+*Test:* el test literal del roadmap es `test_cli_alt_text_matches_caption`: el output contiene `![Figura 3.1 — Diagrama de la imagen central](images/fig-01-01.png)`. Fixture `build_text_with_midpage_image_pdf` extendido con `caption="Figura 3.1 — …"` (parametrizable via `caption=None`). 27/27 tests verdes en `tests/test_images_captions.py`; cobertura de regex multi-idioma, ventana de 3 líneas (incl. blank line skip), atributos `Figure.caption`, integración con `anchor_figures`, y CLI end-to-end. 978/978 verde en suite completa.
 
-**E6. Descripción por LLM (opcional)**
-Flag `--describe-images`: activar `enable_plugins=True` + `markitdown-ocr` con `llm_client`/`llm_model`, o llamar directo a la API para generar alt text de diagramas. Debe degradar limpio si no hay API key.
-*Test:* sin key, corre igual y avisa una vez; con key mockeada, el alt text viene del mock.
+**✅ E6. Descripción por LLM (opcional)**
+Flag `--describe-images`: activa `Engine(enable_plugins=True, llm_client=…, llm_model=…)` para que `markitdown-ocr` describa las imágenes embebidas. Multi-proveedor via factory (`openai` / `anthropic` / `google`) que detecta keys en `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`GOOGLE_API_KEY` (auto por prioridad). Helper `capmd.llm.build_llm_client(provider, model)` es **inyectable** vía `monkeypatch.setattr("capmd.config.build_llm_client", …)`. Degradación limpia: singleton `_LLM_WARNED_ONCE` a nivel CLI emite UN warning si `--describe-images` se pide sin key disponible y la corrida continúa (E5 captions siguen funcionando). Nuevo helper CLI `_resolve_llm_client(...)` retorna `(client, model)` o `(None, None)`. Soporte `--describe-provider` (`auto`/`openai`/`anthropic`/`google`) y `--describe-model` (default por proveedor). Deuda técnica futura: pip-pin de `openai`/`anthropic`/`google-genai` como `[llm-*]` extras opcionales (hoy son opcionales por import lazy).
+*Test:* el test literal del roadmap es `test_cli_describe_images_without_key_runs_anyway` (sin key + `--describe-images` → exit 0, output normal, warning visible). 22/22 tests verdes en `tests/test_images_describe.py`: 5 detect_env, 6 build_llm_client, 3 Engine, 7 _resolve_llm_client (incl. warn-once y provider inválido → typer.BadParameter), 3 CLI integración. 1000/1000 verde en suite completa (incluye regresión fixée en `test_convert_stdin_tty_exits_2` para incluir las nuevas flags).
 
-**E7. `--no-images`**
-Saltar todo el bloque E y dejar `<!-- figura omitida -->` donde iría.
-*Test:* no se crea la carpeta `images/`.
+**✅ E7. `--no-images`**
+Saltar todo el bloque E (E1-E6) e insertar `<!-- figura omitida: Figura C.N -->` en la posición Y de cada imagen embebida. Sin escritura de PNGs (`images/` no se crea); sin anclaje `![]()`; sin detección de captions; sin LLM. Nueva API: `extract_figure_placeholders(pdf, pages, *, chapter_index, page_areas)` que reutiliza `extract_candidates` (E1) sin escribir; `FigurePlaceholder` dataclass; `format_placeholder(p)`; `insert_image_placeholders(markdown_with_markers, placeholders)` paralelo a `anchor_figures`. CLI: `_apply_no_images_marker(...)` que omite `_maybe_extract_images` cuando `--no-images` está activo y aplica el pipeline `convert_pages → per-page cleaning → markers → placeholders → strip`. Default `False` (consistente con E1-E6: imágenes ON por default).
+*Test:* el test literal del roadmap es `test_cli_no_images_does_not_create_images_dir`: con `--no-images`, la carpeta `images/` NO existe (ni junto al `-o` ni en cwd); el output .md se genera normalmente con placeholders. 19/19 tests verdes en `tests/test_images_no_images.py`: 4 unitarios (`format_placeholder`, `extract_figure_placeholders`, `insert_image_placeholders`, marker preservation) + 11 CLI (literal, no anchor, no `images/`, flag en `--help`, interacción con otras flags E, `--page-markers` respetados, no-op para placeholders vacíos). 1019/1019 verde en suite completa.
 
 ---
 
