@@ -123,6 +123,7 @@ def test_convert_stdin_tty_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(_typer.Exit) as excinfo:
         cli_module.convert(
+            ctx=None,
             source="-",
             ext="pdf",
             output=None,
