@@ -349,25 +349,91 @@ Implementado en `src/capmd/output/writer.py` (`resolve_destination_collision` + 
 
 ### Bloque G — Configuración y perfiles
 
-**G1. Config TOML**
+**✅ G1. Config TOML**
 `~/.config/capmd/config.toml` con defaults: `out_dir`, `image_format`, cleaners activos, `page_offset`.
 *Test:* un valor del TOML cambia el comportamiento sin pasar flags.
 
-**G2. Precedencia**
+Implementado en `src/capmd/config.py:1` + helper `available_cleaner_names()` en `src/capmd/clean/pipeline.py:152`. API pública: dataclass inmutable `CapmdConfig(out_dir, image_format, page_offset, cleaners_enabled|disabled, image_overrides, source_paths)` y `load_config(*, project_toml, global_toml) -> CapmdConfig` con precedencia project > global > defaults. Validaciones tolerantes: valores inválidos caen al default con warning (no rompen). Claves raíz desconocidas se loggean en debug. Esquema del TOML: claves planas `out_dir`/`image_format`/`page_offset` + tabla `[cleaners]` con `enabled`/`disabled` (mutuamente excluyentes; ambos presentes → warning + solo `enabled`) + `[images]` (compat E2). Plumbing en `src/capmd/cli.py:493`: los defaults de Typer para `--out`/`--page-offset`/`--image-format` ahora pasan por resolución al inicio de `convert`; lo mismo para `--only-clean`/`--skip-clean` (solo si el usuario NO pasó el flag — el override CLI explícito sobre TOML queda en G2 junto con env vars `CAPMD_*`). 15 tests en `tests/test_config_g1.py`: defaults por clave (4), precedencia project > global (2), casos negativos / inválidos / malformados (4), cleaners whitelist/blacklist/ambos (3), smoke CLI sin/con TOML (2). Compat: `load_image_filter_overrides()` se conserva como shim delegando a `load_config()`. Suite completa: 1293/1293 verdes (1278 previos + 15 nuevos). Sin regresión en E1/E2/dry-run. `ruff check` y `mypy` limpios sobre los archivos tocados.
+
+**✅ G2. Precedencia**
 CLI > env (`CAPMD_*`) > config de proyecto (`./capmd.toml`) > config global > defaults.
 *Test:* cuatro capas, cuatro asserts.
 
-**G3. Perfiles por libro**
-`[books."rust-handbook"]` con `page_offset`, `title_pattern`, cleaners específicos. Se activa con `--book rust-handbook` o por hash del PDF.
+Implementado en `src/capmd/config.py:1` + plumbing en `src/capmd/cli.py:498`. Variables de entorno soportadas (todas validadas con los mismos `_validate_*` que TOML; inválidas → warning + fallback): `CAPMD_OUT_DIR`, `CAPMD_IMAGE_FORMAT`, `CAPMD_PAGE_OFFSET`, `CAPMD_CLEANERS_ENABLED`, `CAPMD_CLEANERS_DISABLED` (CSV con `,` o `;`). `load_config(env=None, *, project_toml, global_toml)` ahora acepta `env` (default = `os.environ`); capas: `defaults < global_toml < project_toml < env`. Helper público `merge_configs(base, override)`. CLI: `convert` recibe `ctx: typer.Context` (primer parámetro) y usa `ctx.get_parameter_source(name)` para detectar si el flag fue pasado por línea de comandos (comparando por `name == "COMMANDLINE"` para evitar la dependencia de identidad entre los enums `click.core.ParameterSource` y `typer._click.core.ParameterSource`). Si NO vino de la commandline, se sustituye por el valor resuelto por `load_config()`; si vino, gana el valor del CLI aunque coincida con el default (e.g. `--page-offset 0`). El bloque G2 se ejecuta solo cuando `ctx is not None` — el call site directo en `test_convert_stdin_tty_exits_2` (typer.Context) ahora pasa `ctx=None` explícitamente y conserva comportamiento pre-G2. 13 tests en `tests/test_config_g2.py`: cuatro asserts de precedencia (CLI > env > project > global > defaults, tests #1–#4); valores inválidos de env (test #5); CSV cleaning parsing (tests #6–#7); `merge_configs` puro (tests #8–#9); smoke CLI end-to-end con `CAPMD_IMAGE_FORMAT=webp` sin flag (#10) y CLI flag (`--image-format png`) que gana sobre env (test #11). Suite completa: 1306/1306 verdes. `ruff check` + `mypy` limpios. Sin regresión sobre G1/E1/E2/dry-run.
+
+**✅ G3. Perfiles por libro**
+`[books."rust-handbook"]` con `page_offset`, `title_pattern`, cleaners específicos. Se activa por `--book <id>` o por hash del PDF (`[books."sha256:<hex>"]`).
 *Test:* dos libros con offsets distintos resuelven rangos distintos con el mismo `--pages`.
 
-**G4. `capmd config init` / `capmd config show`**
+Implementado en `src/capmd/config.py:1` + plumbing en `src/capmd/cli.py:497`. Nueva dataclass `BookProfile(page_offset, image_format, out_dir, cleaners_enabled|disabled, image_overrides, title_pattern)` y constante pública `SHA256_PREFIX = "sha256:"`. Helpers públicos: `find_profile_by_name(books, name)`, `find_profile_by_hash(books, sha256_hex)`, `apply_book_profile(cfg, profile)`. `[books.*]` se parsea una sola vez desde la capa TOML (project > global); no se mergea con env vars (los perfiles viven solo en TOML). Cada campo del perfil es opcional (`None` = sin override); tablas vacías o totalmente inválidas se descartan con warning. `title_pattern` se valida con `re.compile(..., IGNORECASE)`; inválido → warning + se ignora (cae al fallback). CLI: `--book <name>` flag en `convert`; resolución por nombre en el bloque G2, por sha256 después de validar el path (usando `_maybe_sha256_of` existente). Perfil activado se aplica via `apply_book_profile(_cfg, profile)` solo sobre flags que el usuario NO pasó por CLI (CLI sigue ganando). `_resolve_chapter` y `_chapter_index_from_spec` aceptan `title_pattern` opcional (kw-only): regex case-insensitive contra títulos del outline, fallback a substring matching. Capas finales: `defaults < global_toml < project_toml < env < book_profile < CLI`. 23 tests en `tests/test_config_g3.py`: 17 unitarios de `config.py` (lectura, validación, precedencia project > global, CLI > book, hash vs name, regex inválido, tabla vacía) + 6 smoke CLI (dos rangos distintos con `--pages` igual, `--book` cambia `image_format`, `--book` desconocido → error, hash auto-match end-to-end con sha256 real, `title_pattern` regex matchea outline, `title_pattern` inválido cae a substring). Suite completa: 1329/1329 verdes. `ruff check` + `mypy` limpios. Sin regresión sobre G1/G2/E1/E2/dry-run.
+
+**✅ G4. `capmd config init` / `capmd config show`**
 Generar el TOML comentado y mostrar la config efectiva resuelta.
 *Test:* `config show` refleja los overrides activos.
 
-**G5. Auto-registro de libro**
+Implementado en:
+- `src/capmd/config.py:1` — campo nuevo `CapmdConfig.sources: dict[str, str]` con la capa de origen por field (``"default"|"global"|"project"|"env"|"book:<id>"``); constantes públicas ``SRC_DEFAULT``, ``SRC_GLOBAL``, ``SRC_PROJECT``, ``SRC_ENV``. `merge_configs` y `apply_book_profile` propagan sources. `load_config` re-lee el TOML global y project por separado (`_load_toml_layer` ahora devuelve `[(data, path), ...]`) y usa `_detect_layer_name_for_key` para atribuir cada clave al TOML correcto.
+- `src/capmd/config_init.py` (nuevo) — `render_default_toml(target)` devuelve el TOML starter comentado (claves top-level + `[cleaners]` + `[images]` + ejemplo de `[books.<id>"]`).
+- `src/capmd/config_show.py` (nuevo) — `render_table(cfg)` (ASCII con secciones: top-level + sources + env activas + books) y `render_json(cfg)` (JSON parseable equivalente).
+- `src/capmd/cli.py:160` — sub-App `config_app` agregado con `app.add_typer(...)`. Comandos:
+  - `capmd config init [--target project|global] [--stdout] [--force]`: escribe el starter comentado en `./capmd.toml` (default project) o `~/.config/capmd/config.toml` (con `--global`), o a stdout. Crea el directorio padre. Si el destino existe sin `--force` → exit 8 + mensaje claro (consistente con F8 destination collision).
+  - `capmd config show [--json] [--book NAME]`: muestra la config efectiva con trace de procedencia por field. `--json` emite JSON parseable con la misma estructura. `--book NAME` aplica el perfil antes de mostrar (override layering: book > base, igual que en `convert`).
+
+Tests:
+- `tests/test_config_g4_sources.py` — 8 unit tests de tracking de sources (global, project, env, per-key attribution, book profile, `merge_configs`).
+- `tests/test_config_g4.py` — 16 CLI tests (init: default, global, stdout, refuse overwrite, force, parent dirs + contenido del TOML; show: tabla default, JSON parseable, override de project, override de global, override de env, lista de books, `--book` pre-resuelve perfil, `--book` desconocido error, env vars activas).
+- Test literal del roadmap (`config show` refleja los overrides activos): cubierto por `test_show_reflects_project_toml_override` + `test_show_reflects_env_var_override` + `test_show_reflects_global_toml_override`.
+
+Suite completa: 1353/1353 verdes (1337 previos + 16 nuevos = 1353). `ruff check` + `mypy` limpios. Sin regresión sobre G1/G2/G3/E1/E2/dry-run.
+
+Capa ``Books`` en ``config show`` lista cada perfil con sus overrides efectivos; ``Active env vars`` distingue vars ``applied`` (matchearon un field) de ``ignored`` (seteadas pero inválidas). `--book x` muestra la config como si el perfil estuviera activado, útil para preview antes de una conversión real.
+
+**✅ G5. Auto-registro de libro**
 Al convertir un PDF nuevo, guardar su sha256 + título + TOC cacheado para no re-parsear.
 *Test:* la segunda corrida sobre el mismo libro es medible más rápida y no re-lee el outline.
+
+Implementado en:
+
+- `src/capmd/registry.py` (nuevo, ~530 líneas). Dataclass frozen `BookRecord` (sha256, title, format, pages_total, toc: tuple[Chapter, ...], toc_from_outline, source_path, registered_at, last_seen_at, run_count). API: `load_registry`, `save_registry` (atomic via `tempfile.mkstemp` + `os.replace`), `lookup_toc` (O(1) por sha256), `upsert_book` (bump de `run_count`, preserva `registered_at`), `make_record` (helper con timestamps automáticos), `_upsert_locked` (read-modify-write atómico vía `fcntl.flock` sobre `<registry>.lock` en POSIX; degrada limpio en Windows). Formato: JSON (sin nuevas deps) en `~/.config/capmd/registry.json` junto a `config.toml` (G1/G4). Tolerancia: archivo ausente o malformado → `{}` con warning; entradas individuales inválidas se descartan sin afectar al resto. `REGISTRY_PATH` se evalúa al MOMENTO de la llamada (no al import) para que `monkeypatch.setattr` funcione en tests.
+- `src/capmd/cli.py:24` — imports de `_registry_mod` (para `REGISTRY_PATH` dinámico) + `BookRecord`/`lookup_toc`/`upsert_book`.
+- `src/capmd/cli.py:644` — hoisting de `_sha: str | None = None` arriba del if/else para que esté disponible en stdin y file paths.
+- `src/capmd/cli.py:675` — `_sha = _maybe_sha256_of(path)` ahora se ejecuta una sola vez al inicio del flujo de archivo (compartido por G3 profile match y G5 cache lookup).
+- `src/capmd/cli.py:1549` — `_maybe_page_count(path)` (nuevo): cuenta páginas del PDF ORIGINAL, no del sliced, para que `pages_total` en el registry refleje el libro completo aunque se haya convertido con `--chapter`/`--pages`.
+- `src/capmd/cli.py:1585` — `_read_outline_cached(path, sha256_hex, *, registry_enabled)` (nuevo, hot path de G5): consulta el registry primero; si hay cache hit, **NO** invoca `read_outline_with_fallback` (garantía literal del roadmap). Si `ChapterDetectionFailed` se propaga, el caller decide (la CLI lo mapea a exit 4; el bloque de registro lo captura y usa TOC vacío).
+- `src/capmd/cli.py:1620` — `_register_book` (nuevo): persiste un `BookRecord` al registry con title via `_book_title_from_pdf` (PDF `/Title` metadata → fallback `book_slug_from(SourceDoc(...))`).
+- `src/capmd/cli.py:1541` — `_book_title_from_pdf` (nuevo): extrae `reader.metadata.title` via pypdf con fallback al slug del filename.
+- `src/capmd/cli.py:758` — bloque de auto-registro post-convert: solo cuando `not stdin and not no_registry and not dry_run and not is_epub and _sha`; llama `_maybe_page_count` + `_read_outline_cached` (cachea en el segundo run) + `_register_book`. Errores se loggean y la corrida sigue OK.
+- `src/capmd/cli.py:520` — flag `--no-registry` en `convert` (skip read+write; útil para CI y para forzar re-parseo).
+- `src/capmd/cli.py:2493` — flag `--no-registry` en `toc` (mismo propósito).
+- `src/capmd/cli.py:1689, 1782, 2550` — call sites actualizados a `_read_outline_cached` con `sha256_hex` + `registry_enabled`.
+- `src/capmd/cli.py:27` — comentario del módulo `config.py` actualizado: "Caché por sha256 (G5)" ahora implementado.
+- `src/capmd/config_show.py:22` — sección nueva "Registry" en `render_table` (path, count, newest timestamp + sha256[:12]).
+- `src/capmd/config_show.py:151` — `render_json` ahora incluye campo `registry: {path, exists, count}`.
+
+CLI usage:
+
+```bash
+# Primera corrida: puebla el registry.
+capmd convert libro.pdf --chapter 3 --out out/
+
+# Segunda corrida: cache hit, no re-lee el outline.
+capmd convert libro.pdf --chapter 3 --out out/
+
+# Forzar re-lectura y no escribir:
+capmd convert libro.pdf --no-registry
+
+# Ver el registry:
+capmd config show   # incluye sección "Registry (caché de libros por sha256, G5)"
+capmd config show --json   # campo "registry" con {path, exists, count}
+```
+
+Tests:
+
+- `tests/test_registry.py` — 22 unit tests del módulo: load/save round-trip, archivo ausente, JSON malformado, raíz no dict, sección books ausente, entrada individual inválida, clave inválida, parent dirs auto-creados, write atómico (sin partial writes), `os.replace` + `fcntl.flock` (mockeado), `upsert_book` (insert nuevo, bump run_count, preservación de registered_at, reemplazo de TOC), `lookup_toc` hit/miss/sha inválido, concurrencia (8 threads sin corruption), validaciones de `BookRecord`, helper `make_record`.
+- `tests/test_registry_cache.py` — 7 hook tests del comportamiento del cache: cache hit NO llama al fallback (spy-based), cache miss sí llama, cache hit con TOC heurístico (`toc_from_outline=False`), `registry_enabled=False` siempre cae al fallback, miss por sha mismatch, miss con cache vacío, miss sin sha256.
+- `tests/test_registry_cli.py` — 16 e2e tests via `CliRunner`: registro exitoso en convert (entry con title, format, pages_total, toc, run_count=1), `run_count` incrementa en segunda corrida, dos PDFs distintos generan dos entries, **test literal del roadmap**: la segunda corrida NO invoca `read_outline_with_fallback` (spy `call_count` assertion), sanity check de speedup medible, `--no-registry` skip read+write (sin entry, outline sí leído por `--chapter`), `--no-registry` + corrida normal = entry creada, stdin NO toca el registry, `--dry-run` NO registra, falla de convert NO actualiza registry, `capmd toc` usa cache (segunda invocación sin re-lectura), `capmd toc --no-registry` fuerza re-lectura, `config show` y `config show --json` incluyen sección "registry", `--no-registry` aparece en `--help`, `lookup_toc` retorna record tras convert.
+
+Suite completa: **1398/1398 verde** (1353 previos + 22 + 7 + 16 = 1398). `ruff check` + `mypy --strict` limpios sobre `src/capmd/registry.py`, `src/capmd/cli.py`, `src/capmd/config_show.py`. Sin regresión en A1–G4 (incluida la compatibilidad del comportamiento de `ChapterDetectionFailed` → exit 4 verificada con `test_convert_chapter_clear_error_when_detection_fails`).
 
 ---
 
