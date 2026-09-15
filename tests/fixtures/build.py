@@ -28,10 +28,13 @@ __all__ = [
     "build_epub_with_3_chapters",
     "build_header_footer_pdf",
     "build_headings_pdf",
+    "build_logo_repeated_pdf",
     "build_many_pages_pdf",
     "build_no_outline_chapters_pdf",
     "build_outline_toc_pdf",
+    "build_outline_with_chapter_image_pdf",
     "build_table_pdf",
+    "build_text_with_midpage_image_pdf",
     "build_two_images_pdf",
 ]
 
@@ -163,6 +166,227 @@ def build_two_images_pdf(out_path: Path, work_dir: Path) -> Path:
         height=200,
         preserveAspectRatio=True,
     )
+    c.save()
+    return out_path
+
+
+def build_outline_with_chapter_image_pdf(out_path: Path, work_dir: Path) -> Path:
+    """Outline de 3 capítulos + una imagen embebida en la página 2 (capítulo 2).
+
+    Útil para tests que verifican ``--chapter 2`` y la propagación del
+    índice numérico del capítulo al nombre de las imágenes extraídas
+    (E3). Solo el capítulo "Chapter 2: Ownership" lleva una imagen
+    adjunta; los otros capítulos tienen solo texto.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    image_path = work_dir / "chapter2-fig.png"
+    _save_color_square(image_path, (40, 160, 90), size=180)
+
+    c = canvas_module.Canvas(str(out_path), pagesize=LETTER)
+    _, height = LETTER
+
+    # Página 1 — Chapter 1: Getting Started
+    c.bookmarkPage("ch1")
+    c.addOutlineEntry("Chapter 1: Getting Started", "ch1", level=0, closed=False)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(72, height - 72, "Chapter 1: Getting Started")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, height - 100, "Content of chapter 1.")
+    c.showPage()
+
+    # Página 2 — Chapter 2: Ownership (con imagen embebida)
+    c.bookmarkPage("ch2")
+    c.addOutlineEntry("Chapter 2: Ownership", "ch2", level=0, closed=False)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(72, height - 72, "Chapter 2: Ownership")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, height - 100, "Content of chapter 2 with figure.")
+    c.drawImage(
+        str(image_path),
+        x=72,
+        y=height - 360,
+        width=180,
+        height=180,
+        preserveAspectRatio=True,
+    )
+    c.showPage()
+
+    # Página 3 — Chapter 3: Borrowing
+    c.bookmarkPage("ch3")
+    c.addOutlineEntry("Chapter 3: Borrowing", "ch3", level=0, closed=False)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(72, height - 72, "Chapter 3: Borrowing")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, height - 100, "Content of chapter 3.")
+    c.showPage()
+
+    c.save()
+    return out_path
+
+
+_LOGO_SIZE = 50
+_LOGO_FIG_SIZE = 200
+
+
+def build_logo_repeated_pdf(
+    out_path: Path,
+    work_dir: Path,
+    *,
+    n_pages: int = 4,
+) -> Path:
+    """PDF con un logo en cada página + figuras reales intercaladas (target E2).
+
+    Layout por página:
+      - Esquina superior izquierda: logo (50x50 px) — idéntico en todas las páginas.
+      - Cuerpo: tres líneas de texto Helvetica 11.
+      - Páginas 2 y 4 (1-indexed): además, una figura real 200x200 en el centro.
+
+    Con los defaults de :class:`FilterRules` (min_size=64x64,
+    repeat_threshold=0.8, background_coverage=0.85), tras filtrar deben
+    quedar exactamente 2 figuras (las reales de las páginas 2 y 4).
+    El logo aparece en 4/4 = 100% > 0.8 → su primera aparición (página 1)
+    cae por TOO_SMALL primero, así que no se conserva siquiera la primera.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    logo_path = work_dir / "logo.png"
+    red_fig_path = work_dir / "real-red.png"
+    blue_fig_path = work_dir / "real-blue.png"
+
+    _save_color_square(logo_path, (40, 40, 40), size=_LOGO_SIZE)
+    _save_color_square(red_fig_path, (220, 50, 50), size=_LOGO_FIG_SIZE)
+    _save_color_square(blue_fig_path, (50, 80, 220), size=_LOGO_FIG_SIZE)
+
+    c = canvas_module.Canvas(str(out_path), pagesize=LETTER)
+    _, height = LETTER
+    page_width, _ = LETTER
+
+    for page_num in range(1, n_pages + 1):
+        c.setFont("Helvetica", 11)
+        for line in range(3):
+            c.drawString(
+                72, height - 100 - 14 * line, f"Body content of page {page_num}, line {line + 1}."
+            )
+
+        c.drawImage(
+            str(logo_path),
+            x=page_width - 72 - _LOGO_SIZE,
+            y=height - 72 - _LOGO_SIZE,
+            width=_LOGO_SIZE,
+            height=_LOGO_SIZE,
+            preserveAspectRatio=True,
+            mask="auto",
+        )
+
+        if page_num == 2:
+            c.drawImage(
+                str(red_fig_path),
+                x=72,
+                y=height // 2 - _LOGO_FIG_SIZE // 2,
+                width=_LOGO_FIG_SIZE,
+                height=_LOGO_FIG_SIZE,
+                preserveAspectRatio=True,
+            )
+        elif page_num == 4:
+            c.drawImage(
+                str(blue_fig_path),
+                x=72,
+                y=height // 2 - _LOGO_FIG_SIZE // 2,
+                width=_LOGO_FIG_SIZE,
+                height=_LOGO_FIG_SIZE,
+                preserveAspectRatio=True,
+            )
+
+        c.showPage()
+
+    c.save()
+    return out_path
+
+
+def _draw_inline_image(image_path: Path):
+    """Callback legacy; el fixture moderno ya no usa callbacks — ver
+    ``build_text_with_midpage_image_pdf``. Se mantiene por compatibilidad
+    con tests que referenciaban el nombre. La imagen se embebe directamente
+    vía ``canvas.Canvas.drawImage`` para que pypdfium2 la exponga como
+    objeto de tipo imagen."""
+    raise NotImplementedError(
+        "use canvas.Canvas.drawImage directly; see build_text_with_midpage_image_pdf"
+    )
+
+
+def build_text_with_midpage_image_pdf(
+    out_path: Path,
+    work_dir: Path,
+    *,
+    n_paras_page2: int = 5,
+    caption: str | None = "Figura 3.1 — Diagrama de la imagen central",
+) -> Path:
+    """PDF de 2 páginas con texto narrativo y una imagen centrada verticalmente
+    en la página 2 (target E4 + E5).
+
+    Página 1: heading + 3 párrafos de body, sin imágenes.
+    Página 2: heading + ``n_paras_page2`` párrafos numerados + imagen
+    de 200x200 a mitad de la página + (caption opcional) + 1 párrafo final.
+
+    La imagen se embebe con ``canvas.Canvas.drawImage`` para que
+    pypdfium2 la exponga como objeto de tipo ``FPDF_PAGEOBJ_IMAGE``
+    y la extracción (E1) la detecte correctamente.
+
+    Para que ``text extraction`` siga produciendo markdown coherente, los
+    párrafos se renderizan como texto plano encima de la imagen. Si
+    se pasa ``caption=None``, no se dibuja caption (target E5 imagen
+    sin caption).
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    image_path = work_dir / "midpage-fig.png"
+    _save_color_square(image_path, (50, 130, 200), size=200)
+
+    c = canvas_module.Canvas(str(out_path), pagesize=LETTER)
+    _, height = LETTER
+
+    # Página 1 — heading + 3 párrafos.
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(72, height - 72, "Chapter X: Heading on page 1")
+    c.setFont("Helvetica", 11)
+    y = height - 100
+    for i in range(1, 4):
+        c.drawString(72, y, f"This is paragraph {i} on page 1, providing enough text to fill it.")
+        y -= 16
+    c.showPage()
+
+    # Página 2 — heading + n_paras_page2 párrafos + imagen centrada + trailing.
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(72, height - 72, "Chapter Y: Heading on page 2 with mid-page figure")
+    c.setFont("Helvetica", 11)
+    y = height - 100
+    for i in range(1, n_paras_page2 + 1):
+        c.drawString(72, y, f"Body paragraph number {i} on page 2, providing contextual text.")
+        y -= 16
+
+    # Dibuja la imagen centrada verticalmente (≈ y = 296 pts en LETTER).
+    img_size = 200
+    img_y_bottom = height / 2 - img_size / 2
+    c.drawImage(
+        str(image_path),
+        x=72,
+        y=img_y_bottom,
+        width=img_size,
+        height=img_size,
+        preserveAspectRatio=True,
+    )
+
+    # Caption (E5): justo debajo de la imagen, en cursiva.
+    caption_y = None
+    if caption is not None:
+        caption_y = img_y_bottom - 14
+        c.setFont("Helvetica-Oblique", 10)
+        c.drawString(72, caption_y, caption)
+
+    # Párrafo trailing debajo del caption (o de la imagen si no hay caption).
+    c.setFont("Helvetica", 11)
+    trailing_y = (caption_y - 14) if caption_y is not None else (img_y_bottom - 16)
+    c.drawString(72, trailing_y, "Trailing body paragraph on page 2 after the figure.")
+
+    c.showPage()
     c.save()
     return out_path
 
@@ -343,4 +567,7 @@ ALL_BUILDERS = [
     build_many_pages_pdf,
     build_no_outline_chapters_pdf,
     build_epub_with_3_chapters,
+    build_logo_repeated_pdf,
+    build_outline_with_chapter_image_pdf,
+    build_text_with_midpage_image_pdf,
 ]
