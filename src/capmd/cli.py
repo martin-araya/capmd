@@ -13,6 +13,7 @@ from typing import Any, Literal, TypeVar, cast
 import typer
 from rich.console import Console
 
+from capmd import registry as _registry_mod
 from capmd.clean.cleaner import CleanerStat
 from capmd.convert import DEFAULT_LIMITS, ConversionLimits, Engine, parse_size
 from capmd.errors import CapmdError, ConversionFailed, SourceNotFound, UnsupportedFormat
@@ -21,6 +22,7 @@ from capmd.logging import configure_logging, get_logger
 from capmd.models import Chapter, Figure, PageRange, SourceDoc
 from capmd.output.snapshot import write_raw_snapshot
 from capmd.output.writer import OutputPaths
+from capmd.registry import BookRecord, lookup_toc, upsert_book
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -166,6 +168,14 @@ app = typer.Typer(
 )
 
 
+config_app = typer.Typer(
+    name="config",
+    help="Inicializa o inspecciona el TOML de configuración (G4).",
+    no_args_is_help=True,
+)
+app.add_typer(config_app)
+
+
 @app.callback()
 def _root(
     ctx: typer.Context,
@@ -196,6 +206,7 @@ def version() -> None:
 @app.command()
 @_handle_capmd_errors
 def convert(
+    ctx: typer.Context,  # typer auto-inject; tests directos pasan kwargs por nombre.
     source: str = typer.Argument(
         ...,
         help=(
@@ -317,14 +328,17 @@ def convert(
         help=(
             "Diferencia entre paginación impresa y física (printed - physical). "
             "Aplica a --pages y al rango del --chapter. Negativo para libros "
-            "con front matter en romanos. Default: 0."
+            "con front matter en romanos. Default: 0 (o el del TOML / env)."
         ),
     ),
     image_format: str = typer.Option(
         "png",
         "--image-format",
         case_sensitive=False,
-        help=("(E1) Formato de las imágenes extraídas del PDF: 'png' o 'webp'. Default: png."),
+        help=(
+            "(E1) Formato de las imágenes extraídas del PDF: 'png' o 'webp'. "
+            "Default: 'png' (o el del TOML / env)."
+        ),
     ),
     image_max_width: int | None = typer.Option(
         None,
@@ -489,12 +503,90 @@ def convert(
             "excluyente con --force."
         ),
     ),
+    book: str | None = typer.Option(
+        None,
+        "--book",
+        help=(
+            "(G3) Activa un perfil declarado en [books.\"<id>\"] del "
+            "TOML (project > global). Sin este flag, se intenta "
+            "auto-matching por sha256 del PDF contra perfiles "
+            "[books.\"sha256:<hash>\"]."
+        ),
+    ),
+    no_registry: bool = typer.Option(
+        False,
+        "--no-registry",
+        help=(
+            "(G5) No leer ni escribir el registry local de libros "
+            "(~/.config/capmd/registry.json). Útil para CI, runs de "
+            "una sola vez, o cuando querés forzar re-parseo del outline."
+        ),
+    ),
 ) -> None:
     """Convierte un archivo a Markdown vía markitdown."""
     try:
         limits = _build_limits(max_size, max_pages, timeout, warn_pages)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
+
+    # G2: aplicar defaults con precedencia CLI > env > project > global > defaults.
+    # Se ejecuta SOLO cuando ``ctx`` está disponible (camino Typer/Click).
+    # En llamadas directas a ``convert()`` desde tests se omite, ya que
+    # ``out_dir``/``flat`` llegan como ``typer.Option`` puros y la
+    # sustitución rompería validaciones que dependen del sentinel.
+
+    from capmd import config as _capmd_config
+
+    # Sentinels fuera del ``if`` para que mypy no se queje de flujo
+    # condicional. En el camino ``ctx is None`` (tests directos) no
+    # se usan: el perfil queda ``None`` y nada se reemplaza.
+    _cfg: _capmd_config.CapmdConfig | None = None
+    _book_profile: _capmd_config.BookProfile | None = None
+    _title_pattern: str | None = None
+
+    if ctx is not None:
+        _cfg = _capmd_config.load_config()
+
+        def _is_commandline(flag_name: str) -> bool:
+            try:
+                src = ctx.get_parameter_source(flag_name)
+            except Exception:
+                return False
+            if src is None:
+                return False
+            # ``typer.Context`` usa su propio enum ``ParameterSource``
+            # (typer._click.core). Comparar por ``.name`` evita la
+            # dependencia de identidad de clase.
+            return getattr(src, "name", "") == "COMMANDLINE"
+
+        def _from_cfg(attr: str, current: object, *, flag_name: str) -> object:
+            # Si el flag fue pasado por CLI, gana (incluso si su valor
+            # coincide con el default — `ParameterSource` nos dice si
+            # fue explícito).
+            if _is_commandline(flag_name):
+                return current
+            return getattr(_cfg, attr)
+
+        from typing import cast
+        out_dir = cast(Path | None, _from_cfg("out_dir", out_dir, flag_name="out_dir"))
+        page_offset = cast(int, _from_cfg("page_offset", page_offset, flag_name="page_offset"))
+        image_format = cast(str, _from_cfg("image_format", image_format, flag_name="image_format"))
+        if not _is_commandline("only_clean") and _cfg.cleaners_enabled is not None:
+            only_clean = ",".join(_cfg.cleaners_enabled)
+        if not _is_commandline("skip_clean") and _cfg.cleaners_disabled is not None:
+            skip_clean = ",".join(_cfg.cleaners_disabled)
+
+        # G3: nombre del perfil de libro (--book). El auto-match por
+        # sha256 se hace abajo, después de validar el path.
+        if book is not None:
+            _book_profile = _capmd_config.find_profile_by_name(_cfg.books, book)
+            if _book_profile is None:
+                raise typer.BadParameter(
+                    f"--book {book!r} no está definido en [books.{book}] del TOML"
+                )
+
+    if chapter is not None and pages is not None:
+        raise typer.BadParameter("--chapter y --pages son mutuamente excluyentes")
 
     if chapter is not None and pages is not None:
         raise typer.BadParameter("--chapter y --pages son mutuamente excluyentes")
@@ -549,6 +641,7 @@ def convert(
     chapter_index: int = 1
     resolved_chapter: Chapter | None = None
     resolved_page_range: PageRange | None = None
+    _sha: str | None = None  # G5: pre-computado en el else (file path); None para stdin.
     if source == "-":
         if ext is None:
             raise UnsupportedFormat(
@@ -578,7 +671,37 @@ def convert(
                 f"no se encontró el archivo: {path}",
                 hint="verificá la ruta o pasá el archivo por stdin con --ext",
             )
+        # G5: pre-computar sha256 una vez para G3 (profile match) y G5 (cache lookup).
+        # Es barato comparado con la conversión; si el archivo no se puede leer
+        # simplemente devuelve None y todo sigue funcionando.
+        _sha = _maybe_sha256_of(path)
+        # G3: hash match antes de pages/chapter para que el offset del
+        # perfil aplique al rango resuelto. Solo si NO hubo --book.
+        if ctx is not None and _book_profile is None and _cfg is not None and _sha:
+            _hash_profile = _capmd_config.find_profile_by_hash(_cfg.books, _sha)
+            if _hash_profile is not None:
+                logger.info(
+                    "perfil auto-match por sha256: %s",
+                    _hash_profile.name,
+                )
+                _book_profile = _hash_profile
+        # Aplicar el perfil (name o hash) sobre _cfg y re-bind flags.
+        if ctx is not None and _book_profile is not None and _cfg is not None:
+            _cfg = _capmd_config.apply_book_profile(_cfg, _book_profile)
+            _title_pattern = _book_profile.title_pattern
+            if not _is_commandline("page_offset") and _cfg.page_offset != 0:
+                page_offset = _cfg.page_offset
+            if not _is_commandline("image_format") and _cfg.image_format != "png":
+                image_format = _cfg.image_format
+            if not _is_commandline("out_dir") and _cfg.out_dir is not None:
+                out_dir = _cfg.out_dir
+            if not _is_commandline("only_clean") and _cfg.cleaners_enabled is not None:
+                only_clean = ",".join(_cfg.cleaners_enabled)
+            if not _is_commandline("skip_clean") and _cfg.cleaners_disabled is not None:
+                skip_clean = ",".join(_cfg.cleaners_disabled)
+
         target_path = path
+        registry_enabled = not no_registry
         if chapter is not None:
             if path.suffix.lower() == ".epub":
                 target_path, sliced_temp, resolved_chapter = _resolve_chapter_epub(path, chapter)
@@ -590,9 +713,22 @@ def convert(
                     chapter_pages,
                     resolved_page_range,
                     resolved_chapter,
-                ) = _resolve_chapter(path, chapter, page_offset)
+                ) = _resolve_chapter(
+                    path,
+                    chapter,
+                    page_offset,
+                    title_pattern=_title_pattern,
+                    sha256_hex=_sha,
+                    registry_enabled=registry_enabled,
+                )
                 extract_pages = chapter_pages
-                chapter_index = _chapter_index_from_spec(path, chapter)
+                chapter_index = _chapter_index_from_spec(
+                    path,
+                    chapter,
+                    title_pattern=_title_pattern,
+                    sha256_hex=_sha,
+                    registry_enabled=registry_enabled,
+                )
                 logger.info(
                     "convirtiendo %s (capítulo %r=%d, offset=%d)",
                     path,
@@ -620,6 +756,43 @@ def convert(
     result_reported = result  # se usa al final (F6 report) para pages + size.
     if sliced_temp is not None:
         sliced_temp.unlink(missing_ok=True)
+
+    # G5: auto-registro del libro al final exitoso de la corrida.
+    # Solo cuando hay source real (no stdin), es PDF, y no se desactivó
+    # vía --no-registry. --dry-run NO registra (no escribió nada).
+    if (
+        source != "-"
+        and not no_registry
+        and not dry_run
+        and not is_epub
+        and _sha
+    ):
+        _registry_pages = _maybe_page_count(path)
+        if _registry_pages:
+            try:
+                from capmd.errors import ChapterDetectionFailed
+
+                # Leer outline (cacheado si hubo un convert previo). Aun
+                # si no hay outline, registramos el libro: igual sirve
+                # para tracking y para evitar futuras lecturas completas
+                # del PDF cuando no tiene TOC.
+                try:
+                    _chapters_for_registry, _toc_from_outline = _read_outline_cached(
+                        path, _sha, registry_enabled=True
+                    )
+                except ChapterDetectionFailed:
+                    # Sin outline ni heurística capaz: registramos igual
+                    # con TOC vacío (no es error fatal).
+                    _chapters_for_registry, _toc_from_outline = [], False
+                _register_book(
+                    path=path,
+                    sha256_hex=_sha,
+                    chapters=_chapters_for_registry,
+                    pages_total=_registry_pages,
+                    toc_from_outline=_toc_from_outline,
+                )
+            except Exception as exc:
+                logger.warning("registry: skip por error inesperado (%s)", exc)
 
     if source != "-" and not flat:
         if not no_images:
@@ -1357,12 +1530,159 @@ def _maybe_sha256_of(path: Path) -> str | None:
         return None
 
 
+def _maybe_page_count(path: Path) -> int | None:
+    """Cantidad de páginas del PDF (1-based) si se puede leer, si no ``None``.
+
+    Usado por G5 para registrar el ``pages_total`` ORIGINAL del libro,
+    incluso cuando el convert recortó con ``--chapter`` o ``--pages``
+    (en esos casos el sliced PDF tiene menos páginas que el original).
+    """
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+
+        return len(PdfReader(str(path)).pages)
+    except (FileNotFoundError, PdfReadError, OSError, Exception):
+        return None
+
+
 def _format_from_suffix(suffix: str) -> str:
     """Mapea ``.pdf``/``.epub``/... → :class:`Format`. ``other`` para el resto."""
     s = suffix.lower().lstrip(".")
     if s in {"pdf", "epub", "docx", "pptx", "xlsx"}:
         return s
     return "other"
+
+
+def _book_title_from_pdf(path: Path) -> str:
+    """Devuelve el título humano del PDF: metadata ``/Title`` o filename stem.
+
+    Estrategia (G5):
+      1. Intentar ``reader.metadata.title`` (PDF info dict). Si hay
+         string no-vacío → normalizado (strip).
+      2. Fallback: ``book_slug_from(SourceDoc(path, "pdf", "0"*64, size))``
+         sin prefijo ``<stem>`` (slugifier ya devuelve kebab-case).
+
+    Errores de lectura (PDF corrupto) caen al fallback silenciosamente;
+    no es crítico para el registry (es solo informativo).
+    """
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+
+        reader = PdfReader(str(path))
+        meta = reader.metadata
+        if meta is not None:
+            title = meta.title
+            if isinstance(title, str):
+                t = title.strip()
+                if t:
+                    return t
+    except (FileNotFoundError, PdfReadError, OSError, Exception):
+        pass
+
+    from capmd.models import SourceDoc
+    from capmd.output.writer import book_slug_from
+
+    try:
+        size = path.stat().st_size if path.exists() else 0
+    except OSError:
+        size = 0
+    source_doc = SourceDoc(path=path, format="pdf", sha256="0" * 64, size_bytes=size)
+    return book_slug_from(source_doc)
+
+
+def _read_outline_cached(
+    path: Path,
+    sha256_hex: str | None,
+    *,
+    registry_enabled: bool,
+) -> tuple[list[Chapter], bool]:
+    """Lee el outline del PDF; usa el registry si hay cache hit (G5).
+
+    Garantía (criterio literal del roadmap G5): si el registry tiene
+    una entrada válida para ``sha256_hex`` y ``registry_enabled`` es
+    ``True``, NO se invoca :func:`read_outline_with_fallback` sobre
+    el archivo.
+
+    Returns:
+        ``(chapters, toc_from_outline)`` donde ``toc_from_outline`` es
+        ``False`` cuando los capítulos vinieron de la heurística (C8).
+        Para el caso cacheado, devuelve el flag original guardado.
+    """
+    if registry_enabled and sha256_hex:
+        cached = lookup_toc(sha256_hex, path=_registry_mod.REGISTRY_PATH)
+        if cached is not None and cached.toc:
+            logger.debug(
+                "registry: cache hit para %s (%d capítulos)",
+                path,
+                len(cached.toc),
+            )
+            return list(cached.toc), cached.toc_from_outline
+
+    from capmd.sources.pdf import read_outline_with_fallback
+
+    # ``ChapterDetectionFailed`` se propaga: el caller decide (la CLI
+    # lo mapea a exit 4 via _handle_capmd_errors; el bloque de
+    # registro lo captura por separado).
+    chapters = read_outline_with_fallback(path)
+    toc_from_outline = bool(chapters)
+    return chapters, toc_from_outline
+
+
+def _register_book(
+    *,
+    path: Path,
+    sha256_hex: str | None,
+    chapters: list[Chapter] | tuple[Chapter, ...],
+    pages_total: int,
+    toc_from_outline: bool,
+) -> None:
+    """Persiste el ``BookRecord`` de la corrida en el registry (G5).
+
+    No-op si:
+      - ``sha256_hex`` es ``None`` (no se pudo hashear).
+      - ``pages_total`` es ``None`` o ``<= 0``.
+
+    Registra incluso cuando ``chapters`` está vacío (PDF sin outline):
+    el cache sigue siendo útil para ``pages_total`` y para el
+    ``title``/``source_path`` de tracking. ``lookup_toc`` con TOC
+    vacío retorna ``None`` y se comporta como miss, así que no
+    afecta correctness.
+
+    Los errores se loggean como warning; nunca rompen la corrida.
+    """
+    if not sha256_hex or not pages_total:
+        return
+    try:
+        title = _book_title_from_pdf(path)
+        record = BookRecord(
+            sha256=sha256_hex,
+            title=title,
+            format="pdf",
+            pages_total=pages_total,
+            toc=tuple(chapters),
+            toc_from_outline=toc_from_outline,
+            source_path=str(path),
+            registered_at=_registry_now_iso(),
+            last_seen_at=_registry_now_iso(),
+            run_count=1,
+        )
+        upsert_book(record, path=_registry_mod.REGISTRY_PATH)
+        logger.debug(
+            "registry: registrado %s con %d capítulos (run #1 inicial)",
+            path,
+            len(chapters),
+        )
+    except Exception as exc:
+        logger.warning("registry: no se pudo guardar %s (%s); corrida OK", path, exc)
+
+
+def _registry_now_iso() -> str:
+    """ISO 8601 UTC para timestamps del registry."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 _DEFAULT_CLEANERS: tuple[str, ...] = (
@@ -1438,7 +1758,13 @@ def _resolve_pages(path: Path, spec: str, offset: int = 0) -> tuple[Path, Path, 
 
 
 def _resolve_chapter(
-    path: Path, spec: str, offset: int = 0
+    path: Path,
+    spec: str,
+    offset: int = 0,
+    *,
+    title_pattern: str | None = None,
+    sha256_hex: str | None = None,
+    registry_enabled: bool = True,
 ) -> tuple[Path, Path, list[int], PageRange, Chapter]:
     """Hace lookup del capítulo en el outline y devuelve (target, temp, pages).
 
@@ -1446,16 +1772,27 @@ def _resolve_chapter(
     Si la traslación lleva alguna página fuera del documento, se lanza
     ``RangeOutOfBounds`` (exit 4).
 
+    ``title_pattern`` (G3): si está presente y ``spec`` no es numérico,
+    se usa como regex case-insensitive contra los títulos del outline;
+    si matchea, devuelve ese capítulo. Si no matchea, fallback a
+    ``resolve_chapter`` (substring).
+
+    ``sha256_hex`` y ``registry_enabled`` (G5): controlan el cache lookup
+    del registry. Si ``registry_enabled=True`` y hay cache hit,
+    :func:`read_outline_with_fallback` NO se invoca.
+
     El tercer elemento es la lista de páginas físicas (1-indexed)
     resueltas para el capítulo, que la fase E1 usa para extraer
     imágenes del PDF original.
     """
+    import re
+
     from pypdf import PdfReader
     from pypdf.errors import PdfReadError
 
     from capmd.errors import RangeOutOfBounds, SourceNotFound
     from capmd.sources.chapters import resolve_chapter
-    from capmd.sources.pdf import infer_ranges, read_outline_with_fallback, slice_pdf
+    from capmd.sources.pdf import infer_ranges, slice_pdf
 
     try:
         total = len(PdfReader(str(path)).pages)
@@ -1465,12 +1802,33 @@ def _resolve_chapter(
             hint="el archivo puede estar corrupto o encriptado",
         ) from exc
 
-    chapters = read_outline_with_fallback(path)
+    chapters, _toc_from_outline = _read_outline_cached(
+        path, sha256_hex, registry_enabled=registry_enabled
+    )
     chapters = infer_ranges(chapters, total_pages=total)
-    try:
-        ch = resolve_chapter(chapters, spec)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
+
+    ch: Chapter
+    if title_pattern:
+        try:
+            rgx = re.compile(title_pattern, re.IGNORECASE)
+        except re.error:
+            rgx = None
+        ch = None  # type: ignore[assignment]
+        if rgx is not None:
+            for candidate in chapters:
+                if rgx.search(candidate.title):
+                    ch = candidate
+                    break
+        if ch is None:
+            try:
+                ch = resolve_chapter(chapters, spec)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from None
+    else:
+        try:
+            ch = resolve_chapter(chapters, spec)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
 
     start = ch.start_page + offset
     end = ch.end_page + offset
@@ -1488,14 +1846,27 @@ def _resolve_chapter(
     return temp, temp, pages_list, page_range, ch
 
 
-def _chapter_index_from_spec(path: Path, spec: str) -> int:
+def _chapter_index_from_spec(
+    path: Path,
+    spec: str,
+    *,
+    title_pattern: str | None = None,
+    sha256_hex: str | None = None,
+    registry_enabled: bool = True,
+) -> int:
     """Resuelve el índice numérico 1-based de un spec de ``--chapter`` (E3).
 
     Si ``spec`` es numérico, devuelve ese entero directamente. Si no,
-    resuelve contra el outline (substring case-insensitive del título)
-    y devuelve ``Chapter.index``. Si el outline no existe o hay
-    ambigüedad, devuelve ``1`` y loggea un warning; el nombre de las
-    figuras cae al default sin romper la conversión.
+    resuelve contra el outline:
+      - Si ``title_pattern`` (regex case-insensitive) matchea algún título,
+        devuelve el índice del primer match.
+      - Si no, fallback a substring case-insensitive del título (default).
+
+    ``sha256_hex`` y ``registry_enabled`` (G5): cache lookup opcional.
+
+    Si el outline no existe o hay ambigüedad, devuelve ``1`` y loggea
+    un warning; el nombre de las figuras cae al default sin romper la
+    conversión.
     """
     spec = spec.strip()
     try:
@@ -1506,12 +1877,14 @@ def _chapter_index_from_spec(path: Path, spec: str) -> int:
         return n
 
     try:
+        import re
+
         from pypdf import PdfReader
         from pypdf.errors import PdfReadError
 
         from capmd.errors import SourceNotFound
         from capmd.sources.chapters import resolve_chapter
-        from capmd.sources.pdf import infer_ranges, read_outline_with_fallback
+        from capmd.sources.pdf import infer_ranges
 
         try:
             total = len(PdfReader(str(path)).pages)
@@ -1521,8 +1894,19 @@ def _chapter_index_from_spec(path: Path, spec: str) -> int:
                 hint="el archivo puede estar corrupto o encriptado",
             ) from exc
 
-        chapters = read_outline_with_fallback(path)
+        chapters, _toc_from_outline = _read_outline_cached(
+            path, sha256_hex, registry_enabled=registry_enabled
+        )
         chapters = infer_ranges(chapters, total_pages=total)
+        if title_pattern:
+            try:
+                rgx = re.compile(title_pattern, re.IGNORECASE)
+            except re.error:
+                rgx = None
+            if rgx is not None:
+                for ch in chapters:
+                    if rgx.search(ch.title):
+                        return ch.index
         ch = resolve_chapter(chapters, spec)
         return ch.index
     except Exception as exc:
@@ -2158,13 +2542,21 @@ def toc(
         "--json",
         help="Salida machine-readable en JSON a stdout (en vez del árbol rich).",
     ),
+    no_registry: bool = typer.Option(
+        False,
+        "--no-registry",
+        help=(
+            "(G5) No leer el registry local de libros: forzar re-lectura "
+            "del outline desde el PDF."
+        ),
+    ),
 ) -> None:
     """Imprime el índice (TOC) del archivo en forma de árbol o JSON."""
     import json
 
     from capmd.cli_render import chapters_to_json_dict, render_outline_tree
     from capmd.errors import SourceNotFound
-    from capmd.sources.pdf import infer_ranges, read_outline_with_fallback
+    from capmd.sources.pdf import infer_ranges
 
     if source.suffix.lower() == ".epub":
         from capmd.sources.epub import read_outline as read_outline_epub
@@ -2172,7 +2564,11 @@ def toc(
         chapters = read_outline_epub(source)
         total_pages = len(chapters)
     else:
-        chapters = read_outline_with_fallback(source)
+        # G5: cache lookup opcional del registry.
+        sha = _maybe_sha256_of(source) if not no_registry else None
+        chapters, _toc_from_outline = _read_outline_cached(
+            source, sha, registry_enabled=not no_registry
+        )
         try:
             from pypdf import PdfReader
 
@@ -2192,3 +2588,118 @@ def toc(
 
     tree = render_outline_tree(source, chapters)
     Console().print(tree)
+
+
+# ---------------------------------------------------------------------------
+# G4: `capmd config init` / `capmd config show`
+# ---------------------------------------------------------------------------
+
+
+def _resolve_config_target(target: str) -> Path:
+    """Mapea ``'project' | 'global'`` → Path concreto.
+
+    Project se resuelve contra ``Path.cwd()`` (no contra el ``capmd.toml``
+    del módulo config, que podría estar en otro lado).
+
+    Global se recomputa desde ``$HOME`` en CADA llamada, no desde el
+    ``GLOBAL_TOML`` cacheado al import, para que ``monkeypatch.setenv``
+    (e.g. en tests) funcione.
+    """
+    if target == "global":
+        from pathlib import Path as _Path
+
+        return _Path.home() / ".config" / "capmd" / "config.toml"
+    if target == "project":
+        from pathlib import Path as _Path
+
+        return _Path.cwd() / "capmd.toml"
+    raise ValueError(f"target inválido: {target!r}")
+
+
+@config_app.command("init")
+@_handle_capmd_errors
+def config_init(
+    target: str = typer.Option(
+        "project",
+        "--target",
+        case_sensitive=False,
+        help=(
+            "Dónde escribir: 'project' (./capmd.toml) o 'global' "
+            "(~/.config/capmd/config.toml)."
+        ),
+    ),
+    stdout: bool = typer.Option(
+        False,
+        "--stdout",
+        help="Imprime el TOML a stdout en vez de escribir un archivo.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Sobreescribe si el destino existe.",
+    ),
+) -> None:
+    """Genera un ``capmd.toml`` starter comentado con todas las claves."""
+    from capmd.config_init import render_default_toml
+
+    target_normalized = target.lower()
+    if target_normalized not in {"project", "global"}:
+        raise typer.BadParameter(
+            f"--target {target!r} no es válido; usar 'project' o 'global'"
+        )
+
+    content = render_default_toml(target=target_normalized)
+
+    if stdout:
+        typer.echo(content, nl=False)
+        return
+
+    path = _resolve_config_target(target_normalized)
+    if path.exists() and not force:
+        # No usamos CapmdError (es para fuentes, no para I/O de usuario);
+        # usamos typer.Exit con código 8 (mismo que F8 destination
+        # collision, para consistencia semántica).
+        typer.echo(
+            f"error: {path} ya existe; usá --force para sobreescribir",
+            err=True,
+        )
+        raise typer.Exit(code=8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    typer.echo(f"escrito: {path}", err=True)
+
+
+@config_app.command("show")
+@_handle_capmd_errors
+def config_show(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Salida JSON en vez de tabla.",
+    ),
+    book: str | None = typer.Option(
+        None,
+        "--book",
+        help="Aplica el perfil de libro antes de mostrar el resultado.",
+    ),
+) -> None:
+    """Muestra la config efectiva resuelta y la trace de procedencia."""
+    import os as _os
+
+    from capmd import config as _config_mod
+    from capmd.config_show import render_json, render_table
+
+    cfg = _config_mod.load_config(env=_os.environ)
+
+    if book is not None:
+        profile = _config_mod.find_profile_by_name(cfg.books, book)
+        if profile is None:
+            raise typer.BadParameter(
+                f"--book {book!r} no está definido en [books.{book}] del TOML"
+            )
+        cfg = _config_mod.apply_book_profile(cfg, profile)
+
+    if json_output:
+        typer.echo(render_json(cfg), nl=False)
+    else:
+        typer.echo(render_table(cfg), nl=False)
