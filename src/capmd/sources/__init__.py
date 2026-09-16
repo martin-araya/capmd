@@ -10,7 +10,7 @@ para evitar el choque con el ``read_outline`` de PDF. El dispatcher
 del CLI elige uno u otro según la extensión del archivo.
 """
 
-from capmd.sources.chapters import resolve_chapter
+from capmd.sources.chapters import parse_chapters_spec, resolve_chapter
 from capmd.sources.epub import slice_epub
 from capmd.sources.heuristic import detect_chapters
 from capmd.sources.pages import parse_pages, translate_spec
@@ -27,6 +27,7 @@ __all__ = [
     "OutlineEntry",
     "detect_chapters",
     "infer_ranges",
+    "parse_chapters_spec",
     "parse_pages",
     "read_outline",
     "read_outline_tuples",
