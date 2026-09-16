@@ -263,7 +263,34 @@ Precedencia: flags de CLI > variables `CAPMD_*` > `./capmd.toml` > config global
 
 ---
 
-## Integración con macOS
+## Shell completion
+
+Tab-completion para zsh (default en macOS), bash, fish y PowerShell:
+
+```bash
+# Zsh (recomendado en macOS):
+uv tool install capmd   # o: uv pip install capmd
+capmd --install-completion zsh
+# seguido de: eval "$(capmd --show-completion zsh)"
+
+# Bash:
+capmd --install-completion bash
+# o: source <(capmd --show-completion bash)
+
+# Fish:
+capmd --install-completion fish
+```
+
+Sin argumentos, `--install-completion` autodetecta el shell desde `$SHELL` (vía `shellingham`). El script queda en `~/.zfunc/_capmd` (zsh), `~/.bash_completions/capmd.sh` (bash) o `~/.config/fish/completions/capmd.fish` (fish).
+
+Para zsh, asegurate de tener en tu `~/.zshrc`:
+
+```bash
+fpath+=~/.zfunc
+autoload -Uz compinit
+compinit
+```
+
 
 **Atajo / Quick Action.** Click derecho sobre un PDF en Finder → *Convertir capítulo a Markdown*. El Atajo pide el rango y llama a `capmd`.
 
@@ -280,6 +307,25 @@ post_command = "mi-script-de-resumen {md_path}"
 ```
 
 Se ejecuta con la ruta del `.md` generado, para encadenar `capmd` con lo que venga después.
+
+---
+
+## Abrir el resultado en el editor (H5)
+
+Tras convertir, podés abrir el `.md` automáticamente:
+
+```bash
+capmd convert tests/fixtures/x.pdf -o /tmp/x.md --open   # usa $EDITOR (o `open` en macOS)
+capmd convert tests/fixtures/x.pdf -o /tmp/x.md --open --open-cmd "code --wait"
+```
+
+O re-abrir un `.md` ya existente:
+
+```bash
+capmd open /tmp/x.md
+```
+
+Fire-and-forget: no espera al editor. Sin `$EDITOR` y en Linux/macOS no-macOS, fijalo en tu shell (`export EDITOR=vim` o pasá `--editor "<cmd>"`).
 
 ---
 

@@ -62,6 +62,16 @@ ruff check . && mypy src/capmd/core
 
 Los golden files viven en `tests/golden/`. Si un cambio altera un golden, **revisar el diff a mano** antes de regenerarlo: el diff es la evidencia de si el cleaner mejoró o rompió algo.
 
+## Shell completion (zsh por default en macOS)
+
+`capmd --install-completion <shell>` está habilitado vía Typer (H4). El
+script queda en `~/.zfunc/_capmd` (zsh), `~/.bash_completions/capmd.sh`
+(bash) o `~/.config/fish/completions/capmd.fish` (fish). En CI los tests
+usan `_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION=1` para invocar
+`--show-completion <shell>` y `HOME=$tmp` para no tocar el filesystem
+del usuario. Si desactivás `add_completion`, rompes esos tests y H4
+queda sin documentar en `--help`.
+
 ## Convenciones
 
 - Commits convencionales: `feat(clean): dehyphenation heuristic`, `fix(pdf): offset off-by-one`.
@@ -70,7 +80,6 @@ Los golden files viven en `tests/golden/`. Si un cambio altera un golden, **revi
 - Docstrings en los limpiadores explicando **qué patrón detectan y qué caso deliberadamente no tocan** (el falso positivo importa más que el positivo).
 
 ## Qué no hacer
-
 - No agregar dependencias nuevas sin justificarlo contra las que ya están.
 - No vendorizar markitdown ni parchearlo en runtime; si algo le falta, se resuelve en `clean/` o en un plugin propio (fase K1).
 - No implementar fases adelantadas "de paso". Si una fase necesita algo de otra, decirlo y detenerse.

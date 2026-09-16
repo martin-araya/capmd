@@ -18,17 +18,32 @@ from capmd.clean.cleaner import CleanerStat
 from capmd.convert import DEFAULT_LIMITS, ConversionLimits, Engine, parse_size
 from capmd.errors import CapmdError, ConversionFailed, SourceNotFound, UnsupportedFormat
 from capmd.images.filter import FilterReport
-from capmd.logging import configure_logging, get_logger
+from capmd.logging import configure_logging, configure_quiet, get_logger
 from capmd.models import Chapter, Figure, PageRange, SourceDoc
 from capmd.output.snapshot import write_raw_snapshot
 from capmd.output.writer import OutputPaths
+from capmd.progress import silent_console_text_io, stages
 from capmd.registry import BookRecord, lookup_toc, upsert_book
+from capmd.sources.chapters import parse_chapters_spec as _parse_chapters_spec
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 logger = get_logger(__name__)
 
 _stderr = Console(stderr=True, soft_wrap=True)
+
+
+def _silence_stderr(quiet: bool) -> None:
+    """Redirige ``_stderr`` a un buffer vacío cuando ``--quiet`` está activo.
+
+    Mantiene la misma instancia de ``Console`` (los call sites usan el
+    global) pero cambia su ``file`` a un ``StringIO``. Al volver a
+    ``False``, restaura ``sys.stderr``.
+    """
+    if quiet:
+        _stderr.file = silent_console_text_io()
+    else:
+        _stderr.file = sys.stderr
 
 
 def _handle_capmd_errors(func: _F) -> _F:
@@ -162,7 +177,7 @@ def _resolve_version() -> str:
 app = typer.Typer(
     name="capmd",
     help="Recorta el capítulo de un libro y lo deja en Markdown limpio.",
-    add_completion=False,
+    add_completion=True,
     invoke_without_command=True,
     pretty_exceptions_show_locals=False,
 )
@@ -186,12 +201,26 @@ def _root(
         count=True,
         help="Aumenta el nivel de detalle. -v = INFO, -vv = DEBUG.",
     ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        is_flag=True,
+        help=(
+            "(H1) Suprime progreso, logs y el F6 report. stderr queda "
+            "vacío al final de una corrida exitosa. Gana sobre --verbose."
+        ),
+    ),
 ) -> None:
-    """Stub root callback. Logging configurado por verbose count."""
+    """Stub root callback. Logging configurado por verbose count + --quiet."""
     configure_logging(verbose)
-    logger.debug("capmd CLI iniciando (verbose=%d)", verbose)
+    if quiet:
+        configure_quiet()
+    logger.debug("capmd CLI iniciando (verbose=%d, quiet=%s)", verbose, quiet)
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
+    ctx.obj["quiet"] = quiet
+    _silence_stderr(quiet)
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(code=0)
@@ -201,6 +230,51 @@ def _root(
 def version() -> None:
     """Imprime la versión de capmd."""
     typer.echo(f"capmd {_resolve_version()}")
+
+
+@app.command(name="open")
+@_handle_capmd_errors
+def open_(
+    ctx: typer.Context,
+    path: Path = typer.Argument(  # noqa: B008
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Archivo a abrir (.md u otro).",
+    ),
+    editor: str | None = typer.Option(
+        None,
+        "--editor",
+        help=(
+            "Override del comando editor. Si no, usa ``$EDITOR`` (o "
+            "``open`` en macOS). Acepta shell words: ``code --wait``."
+        ),
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", is_flag=True,
+        help="(H1) Silencia el log a stderr (no afecta al open).",
+    ),
+) -> None:
+    """Abre un archivo en el editor (``$EDITOR`` o ``open`` en macOS) (H5)."""
+    from capmd.open import open_in_editor
+
+    quiet_effective = quiet or bool(
+        ctx.obj.get("quiet", False) if ctx is not None else False
+    )
+
+    try:
+        open_in_editor(path, editor=editor)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(
+            f"editor no encontrado ({exc.filename or exc.strerror}). "
+            "Verificá $EDITOR o --editor."
+        ) from None
+    except typer.BadParameter:
+        raise
+
+    if not quiet_effective:
+        typer.echo(f"abierto: {path}", err=True)
 
 
 @app.command()
@@ -392,6 +466,24 @@ def convert(
         help=(
             "(D5/E4) Conservar los centinelas <!-- page N --> en el output "
             "final. Por defecto se eliminan antes de escribir el .md."
+        ),
+    ),
+    open_after: bool = typer.Option(
+        False,
+        "--open",
+        is_flag=True,
+        help=(
+            "(H5) Tras escribir el .md, abrirlo en $EDITOR (o `open` en "
+            "macOS). Fire-and-forget: no espera al editor."
+        ),
+    ),
+    open_cmd: str | None = typer.Option(
+        None,
+        "--open-cmd",
+        help=(
+            "(H5) Override del comando editor para ``--open``. Si no, "
+            "usa ``$EDITOR`` (o ``open`` en macOS). Acepta shell words, "
+            "ej: ``code --wait``."
         ),
     ),
     describe_images: bool = typer.Option(
@@ -636,48 +728,23 @@ def convert(
         describe_model=describe_model,
     )
     engine = Engine(limits=limits, llm_client=llm_client, llm_model=llm_model)
-    sliced_temp: Path | None = None
-    extract_pages: list[int] | None = None
-    chapter_index: int = 1
-    resolved_chapter: Chapter | None = None
-    resolved_page_range: PageRange | None = None
-    _sha: str | None = None  # G5: pre-computado en el else (file path); None para stdin.
-    if source == "-":
-        if ext is None:
-            raise UnsupportedFormat(
-                "falta --ext para leer desde stdin",
-                hint="indicá el formato: capmd convert - --ext pdf",
-            )
-        if pages is not None:
-            raise typer.BadParameter(
-                "--pages no se puede combinar con stdin (pasá la ruta directa)"
-            )
-        if chapter is not None:
-            raise typer.BadParameter(
-                "--chapter no se puede combinar con stdin (pasá la ruta directa)"
-            )
-        if sys.stdin.isatty():
-            raise SourceNotFound(
-                "no hay datos en stdin",
-                hint="pipeá un archivo (cat x.pdf | capmd convert - --ext pdf) "
-                "o pasá la ruta directa",
-            )
-        logger.info("convirtiendo stdin como %s", ext)
-        result = engine.convert_stream(sys.stdin.buffer, extension=ext)
-    else:
-        path = Path(source)
-        if not path.exists() or not path.is_file():
-            raise SourceNotFound(
-                f"no se encontró el archivo: {path}",
-                hint="verificá la ruta o pasá el archivo por stdin con --ext",
-            )
-        # G5: pre-computar sha256 una vez para G3 (profile match) y G5 (cache lookup).
-        # Es barato comparado con la conversión; si el archivo no se puede leer
-        # simplemente devuelve None y todo sigue funcionando.
-        _sha = _maybe_sha256_of(path)
-        # G3: hash match antes de pages/chapter para que el offset del
-        # perfil aplique al rango resuelto. Solo si NO hubo --book.
-        if ctx is not None and _book_profile is None and _cfg is not None and _sha:
+    _quiet: bool = bool(ctx.obj.get("quiet", False)) if ctx is not None else False
+    _silence_stderr(_quiet)
+
+    # G5 + G3: pre-computar sha256 y resolver perfil de libro por hash antes
+    # de pasar al cuerpo de conversión (que ya recibe ``_sha``, ``_cfg``,
+    # ``_book_profile``, ``_title_pattern`` con los flags re-bind aplicados).
+    _sha: str | None = None
+    if source != "-":
+        _path_pre = Path(source)
+        if _path_pre.exists() and _path_pre.is_file():
+            _sha = _maybe_sha256_of(_path_pre)
+        if (
+            ctx is not None
+            and _book_profile is None
+            and _cfg is not None
+            and _sha
+        ):
             _hash_profile = _capmd_config.find_profile_by_hash(_cfg.books, _sha)
             if _hash_profile is not None:
                 logger.info(
@@ -685,7 +752,6 @@ def convert(
                     _hash_profile.name,
                 )
                 _book_profile = _hash_profile
-        # Aplicar el perfil (name o hash) sobre _cfg y re-bind flags.
         if ctx is not None and _book_profile is not None and _cfg is not None:
             _cfg = _capmd_config.apply_book_profile(_cfg, _book_profile)
             _title_pattern = _book_profile.title_pattern
@@ -700,338 +766,578 @@ def convert(
             if not _is_commandline("skip_clean") and _cfg.cleaners_disabled is not None:
                 skip_clean = ",".join(_cfg.cleaners_disabled)
 
-        target_path = path
-        registry_enabled = not no_registry
-        if chapter is not None:
-            if path.suffix.lower() == ".epub":
-                target_path, sliced_temp, resolved_chapter = _resolve_chapter_epub(path, chapter)
-                logger.info("convirtiendo %s (capítulo %r)", path, chapter)
-            else:
+    _run_convert_body(
+        ctx=ctx,
+        source=source,
+        ext=ext,
+        output=output,
+        out_dir=out_dir,
+        flat=flat,
+        page_offset=page_offset,
+        pages=pages,
+        chapter=chapter,
+        no_images=no_images,
+        no_anchor=no_anchor,
+        no_clean=no_clean,
+        only_clean=only_clean,
+        skip_clean=skip_clean,
+        only_clean_str=only_clean_str,
+        skip_clean_str=skip_clean_str,
+        split=split,
+        split_normalized=split_normalized,
+        toc=toc,
+        toc_depth=toc_depth,
+        report_format=report_format,
+        no_warnings=no_warnings,
+        strict=strict,
+        dry_run=dry_run,
+        dry_run_format=dry_run_format,
+        force=force,
+        suffix=suffix,
+        engine=engine,
+        llm_client=llm_client,
+        llm_model=llm_model,
+        keep_raw=keep_raw,
+        keep_page_markers=page_markers,
+        filter_min_size=filter_min_size,
+        filter_repeat_threshold=filter_repeat_threshold,
+        filter_background_coverage=filter_background_coverage,
+        image_format=image_format,
+        image_max_width=image_max_width,
+        max_size=max_size,
+        max_pages=max_pages,
+        timeout=timeout,
+        warn_pages=warn_pages,
+        no_registry=no_registry,
+        open_after=open_after,
+        open_cmd=open_cmd,
+        _sha=_sha,
+        _book_profile=_book_profile,
+        _cfg=_cfg,
+        _title_pattern=_title_pattern,
+        _quiet=_quiet,
+    )
+
+
+def _run_convert_body(
+    *,
+    ctx: typer.Context | None,
+    source: str,
+    ext: str | None,
+    output: Path | None,
+    out_dir: Path | None,
+    flat: bool,
+    page_offset: int,
+    pages: str | None,
+    chapter: str | None,
+    no_images: bool,
+    no_anchor: bool,
+    no_clean: bool,
+    only_clean: str | None,
+    skip_clean: str | None,
+    only_clean_str: str | None,
+    skip_clean_str: str | None,
+    split: str | None,
+    split_normalized: str | None,
+    toc: bool,
+    toc_depth: int,
+    report_format: str,
+    no_warnings: bool,
+    strict: bool,
+    dry_run: bool,
+    dry_run_format: str,
+    force: bool,
+    suffix: bool,
+    engine: Engine,
+    llm_client: Any,
+    llm_model: str | None,
+    keep_raw: bool,
+    keep_page_markers: bool,
+    filter_min_size: str | None,
+    filter_repeat_threshold: float | None,
+    filter_background_coverage: float | None,
+    image_format: str,
+    image_max_width: int | None,
+    max_size: str | None,
+    max_pages: int | None,
+    timeout: int | None,
+    warn_pages: int | None,
+    no_registry: bool,
+    open_after: bool,
+    open_cmd: str | None,
+    _sha: str | None,
+    _book_profile: Any,
+    _cfg: Any,
+    _title_pattern: str | None,
+    _quiet: bool,
+) -> None:
+    """Cuerpo principal de ``convert`` envuelto en ``stages()`` (H1).
+
+    Mantiene la lógica previa intacta; el único cambio funcional es:
+
+    - Las 5 stages (``recorte → conversión → limpieza → imágenes →
+      escritura``) se avanzan en los call sites correspondientes.
+    - El F6 report (``_finalize_and_return``) solo se imprime a stderr
+      cuando ``_quiet`` es False.
+    """
+    sliced_temp: Path | None = None
+    extract_pages: list[int] | None = None
+    chapter_index: int = 1
+    resolved_chapter: Chapter | None = None
+    resolved_page_range: PageRange | None = None
+    # ``path`` es siempre ``Path`` (mypy no se queja): en la rama
+    # stdin usamos un sentinel ``Path("-")`` que nunca se desreferencia
+    # porque todos los usos están gateados por ``source != "-"``.
+    path: Path
+    is_epub = Path(source).suffix.lower() == ".epub" if source != "-" else False
+    # Path al .md final que ``--open`` debe abrir tras la escritura.
+    final_md_path: Path | None = None
+
+    # Recorte: solo si hay ruta (no stdin) y se va a recortar (pages/chapter).
+    with stages(quiet=_quiet) as prog:
+        _t_recorte: int | None = None
+        _t_conv: int | None = None
+        _t_clean: int | None = None
+        _t_imgs: int | None = None
+        _t_write: int | None = None
+
+        if source == "-":
+            if ext is None:
+                raise UnsupportedFormat(
+                    "falta --ext para leer desde stdin",
+                    hint="indicá el formato: capmd convert - --ext pdf",
+                )
+            if pages is not None:
+                raise typer.BadParameter(
+                    "--pages no se puede combinar con stdin (pasá la ruta directa)"
+                )
+            if chapter is not None:
+                raise typer.BadParameter(
+                    "--chapter no se puede combinar con stdin (pasá la ruta directa)"
+                )
+            if sys.stdin.isatty():
+                raise SourceNotFound(
+                    "no hay datos en stdin",
+                    hint="pipeá un archivo (cat x.pdf | capmd convert - --ext pdf) "
+                    "o pasá la ruta directa",
+                )
+            logger.info("convirtiendo stdin como %s", ext)
+            _t_conv = prog.start("conversión", total=None)
+            result = engine.convert_stream(sys.stdin.buffer, extension=ext)
+            prog.stop(_t_conv)
+            path = Path("-")  # sentinel; solo existe cuando ``source != "-"``
+        else:
+            path = Path(source)
+            if not path.exists() or not path.is_file():
+                raise SourceNotFound(
+                    f"no se encontró el archivo: {path}",
+                    hint="verificá la ruta o pasá el archivo por stdin con --ext",
+                )
+            target_path = path
+            registry_enabled = not no_registry
+            will_slice = chapter is not None or pages is not None
+            if will_slice:
+                _t_recorte = prog.start("recorte", total=None)
+
+            if chapter is not None:
+                if path.suffix.lower() == ".epub":
+                    target_path, sliced_temp, resolved_chapter = _resolve_chapter_epub(
+                        path, chapter
+                    )
+                    logger.info("convirtiendo %s (capítulo %r)", path, chapter)
+                else:
+                    (
+                        target_path,
+                        sliced_temp,
+                        chapter_pages,
+                        resolved_page_range,
+                        resolved_chapter,
+                    ) = _resolve_chapter(
+                        path,
+                        chapter,
+                        page_offset,
+                        title_pattern=_title_pattern,
+                        sha256_hex=_sha,
+                        registry_enabled=registry_enabled,
+                    )
+                    extract_pages = chapter_pages
+                    chapter_index = _chapter_index_from_spec(
+                        path,
+                        chapter,
+                        title_pattern=_title_pattern,
+                        sha256_hex=_sha,
+                        registry_enabled=registry_enabled,
+                    )
+                    logger.info(
+                        "convirtiendo %s (capítulo %r=%d, offset=%d)",
+                        path,
+                        chapter,
+                        chapter_index,
+                        page_offset,
+                    )
+            elif pages is not None:
                 (
                     target_path,
                     sliced_temp,
-                    chapter_pages,
+                    resolved_pages,
                     resolved_page_range,
-                    resolved_chapter,
-                ) = _resolve_chapter(
-                    path,
-                    chapter,
-                    page_offset,
-                    title_pattern=_title_pattern,
-                    sha256_hex=_sha,
-                    registry_enabled=registry_enabled,
-                )
-                extract_pages = chapter_pages
-                chapter_index = _chapter_index_from_spec(
-                    path,
-                    chapter,
-                    title_pattern=_title_pattern,
-                    sha256_hex=_sha,
-                    registry_enabled=registry_enabled,
-                )
+                ) = _resolve_pages(path, pages, page_offset)
+                extract_pages = resolved_pages
                 logger.info(
-                    "convirtiendo %s (capítulo %r=%d, offset=%d)",
+                    "convirtiendo %s (recortado con --pages, offset=%d)",
                     path,
-                    chapter,
-                    chapter_index,
+                    pages,
                     page_offset,
                 )
-        elif pages is not None:
-            (
-                target_path,
-                sliced_temp,
-                resolved_pages,
-                resolved_page_range,
-            ) = _resolve_pages(path, pages, page_offset)
-            extract_pages = resolved_pages
-            logger.info(
-                "convirtiendo %s (recortado con --pages, offset=%d)",
-                path,
-                pages,
-                page_offset,
-            )
-        else:
-            logger.info("convirtiendo %s", path)
-        result = engine.convert_path(target_path)
-    result_reported = result  # se usa al final (F6 report) para pages + size.
-    if sliced_temp is not None:
-        sliced_temp.unlink(missing_ok=True)
+            else:
+                logger.info("convirtiendo %s", path)
 
-    # G5: auto-registro del libro al final exitoso de la corrida.
-    # Solo cuando hay source real (no stdin), es PDF, y no se desactivó
-    # vía --no-registry. --dry-run NO registra (no escribió nada).
-    if (
-        source != "-"
-        and not no_registry
-        and not dry_run
-        and not is_epub
-        and _sha
-    ):
-        _registry_pages = _maybe_page_count(path)
-        if _registry_pages:
-            try:
-                from capmd.errors import ChapterDetectionFailed
+            if _t_recorte is not None:
+                prog.stop(_t_recorte)
 
-                # Leer outline (cacheado si hubo un convert previo). Aun
-                # si no hay outline, registramos el libro: igual sirve
-                # para tracking y para evitar futuras lecturas completas
-                # del PDF cuando no tiene TOC.
+            _t_conv = prog.start("conversión", total=None)
+            result = engine.convert_path(target_path)
+            prog.stop(_t_conv)
+
+        result_reported = result
+        if sliced_temp is not None:
+            sliced_temp.unlink(missing_ok=True)
+
+        if (
+            source != "-"
+            and not no_registry
+            and not dry_run
+            and not is_epub
+            and _sha
+        ):
+            _registry_pages = _maybe_page_count(path)
+            if _registry_pages:
                 try:
-                    _chapters_for_registry, _toc_from_outline = _read_outline_cached(
-                        path, _sha, registry_enabled=True
-                    )
-                except ChapterDetectionFailed:
-                    # Sin outline ni heurística capaz: registramos igual
-                    # con TOC vacío (no es error fatal).
-                    _chapters_for_registry, _toc_from_outline = [], False
-                _register_book(
-                    path=path,
-                    sha256_hex=_sha,
-                    chapters=_chapters_for_registry,
-                    pages_total=_registry_pages,
-                    toc_from_outline=_toc_from_outline,
-                )
-            except Exception as exc:
-                logger.warning("registry: skip por error inesperado (%s)", exc)
+                    from capmd.errors import ChapterDetectionFailed
 
-    if source != "-" and not flat:
-        if not no_images:
-            extraction_result = _maybe_extract_images(
-                source_path=path,
-                extract_pages=extract_pages,
-                chapter_index=chapter_index,
-                image_format=image_format,
-                image_max_width=image_max_width,
-                output=output,
-                filter_min_size=filter_min_size,
-                filter_repeat_threshold=filter_repeat_threshold,
-                filter_background_coverage=filter_background_coverage,
-            )
+                    try:
+                        _chapters_for_registry, _toc_from_outline = _read_outline_cached(
+                            path, _sha, registry_enabled=True
+                        )
+                    except ChapterDetectionFailed:
+                        _chapters_for_registry, _toc_from_outline = [], False
+                    _register_book(
+                        path=path,
+                        sha256_hex=_sha,
+                        chapters=_chapters_for_registry,
+                        pages_total=_registry_pages,
+                        toc_from_outline=_toc_from_outline,
+                    )
+                except Exception as exc:
+                    logger.warning("registry: skip por error inesperado (%s)", exc)
+
+        # Imágenes: extracción + anclaje (o marker si --no-images).
+        _t_imgs = prog.start("imágenes", total=None)
+        if source != "-" and not flat:
+            if not no_images:
+                extraction_result = _maybe_extract_images(
+                    source_path=path,
+                    extract_pages=extract_pages,
+                    chapter_index=chapter_index,
+                    image_format=image_format,
+                    image_max_width=image_max_width,
+                    output=output,
+                    filter_min_size=filter_min_size,
+                    filter_repeat_threshold=filter_repeat_threshold,
+                    filter_background_coverage=filter_background_coverage,
+                )
+            else:
+                extraction_result = None
         else:
             extraction_result = None
-    else:
-        extraction_result = None
 
-    raw_markdown = result.markdown
-    cleaner_stats: list[CleanerStat] = []
-    if source == "-":
-        final_markdown, cleaner_stats = _apply_clean_pipeline_to_stdin(
-            raw_markdown,
-            no_clean=no_clean,
-            only_clean=only_clean,
-            skip_clean=skip_clean,
-            ext=ext or "other",
-        )
-    else:
-        final_markdown, cleaner_stats = _apply_clean_pipeline(
-            raw_markdown,
-            no_clean=no_clean,
-            only_clean=only_clean,
-            skip_clean=skip_clean,
-            target_path=target_path,
-        )
+        raw_markdown = result.markdown
+        cleaners_applied = _collect_cleaners_applied(no_clean, only_clean, skip_clean)
+        _t_clean = prog.start("limpieza", total=max(len(cleaners_applied), 1))
 
-    extracted_figures: list[Figure] = []
-    if not flat and (
-        no_images
-        and source != "-"
-        and path.suffix.lower() == ".pdf"
-    ):
-        # E7: reemplaza la pipeline de extracción+anchor por placeholders.
-        final_markdown, anchor_stats = _apply_no_images_marker(
-            source_path=path,
-            engine=engine,
-            extract_pages=extract_pages,
-            chapter_index=chapter_index,
-            no_clean=no_clean,
-            only_clean=only_clean,
-            skip_clean=skip_clean,
-            keep_page_markers=page_markers,
-        )
-        cleaner_stats = list(cleaner_stats) + anchor_stats
-    elif not flat and not no_anchor and extraction_result is not None and extraction_result[0]:
-        final_markdown, anchor_stats = _apply_anchor(
-            source_path=path,
-            figures=extraction_result[0],
-            engine=engine,
-            no_clean=no_clean,
-            only_clean=only_clean,
-            skip_clean=skip_clean,
-            keep_page_markers=page_markers,
-        )
-        cleaner_stats = list(cleaner_stats) + anchor_stats
-        extracted_figures = list(extraction_result[0])
-
-    # F3: elapsed seconds de la corrida (engine expone esto ya en
-    # ConversionOutput).
-    elapsed_seconds = result.elapsed_seconds
-
-    if keep_raw:
-        snapshot_path = write_raw_snapshot(raw_markdown, output_path=output)
-        logger.info("snapshot crudo: %s", snapshot_path)
-        _stderr.print(f"[dim]snapshot crudo: {snapshot_path}[/dim]")
-
-    # F5: TOC inline. Inyectamos sobre `final_markdown` ANTES del FM
-    # prepend (F2) para que el orden final sea FM → H1 → TOC → body.
-    if toc:
-        from capmd.output.toc import inject_toc
-        toc_md = inject_toc(final_markdown, depth=toc_depth)
-    else:
-        toc_md = final_markdown
-
-    if out_dir is not None or output is not None:
-        file_markdown = _prepend_front_matter_for_file(
-            final_markdown=toc_md,
-            source_path=path if source != "-" else None,
-            stdin=source == "-",
-            resolved_chapter=resolved_chapter,
-            resolved_page_range=resolved_page_range,
-            no_clean=no_clean,
-            only_clean=only_clean_str,
-            skip_clean=skip_clean_str,
-        )
-        # F3: title con fallback chain H1 → chapter.title → book_slug.
-        file_title = _resolve_file_title(
-            final_markdown=final_markdown,
-            resolved_chapter=resolved_chapter,
-            source_path=path if source != "-" else None,
-            stdin=source == "-",
-        )
-    else:
-        file_markdown = toc_md
-        file_title = ""
-
-    # F6: computar warnings una sola vez antes de escribir capmd.json
-    # para que se persistan en el JSON y se reusen en el reporte final.
-    from capmd.report import collect_stats, collect_warnings
-    _pages = getattr(result_reported, "page_count", None)
-    _path_for_format = path if source != "-" else None
-    _fmt = _source_format_from(_path_for_format, ext, source)
-    _stats_for_warnings = collect_stats(
-        raw_markdown=raw_markdown,
-        final_markdown=final_markdown,
-        pages=_pages,
-        figures_count=len(extracted_figures),
-        cleaner_stats=tuple(_stats_to_dicts(cleaner_stats)),
-        elapsed_seconds=elapsed_seconds,
-        source_format=_fmt,
-    )
-    # El `capmd.json` SIEMPRE persiste los warnings completos (es un
-    # contrato para tooling/CI); ``--no-warnings`` solo silencia su
-    # impresión a stderr.
-    run_warnings_list = collect_warnings(
-        _stats_for_warnings, no_clean=no_clean, format=_fmt
-    )
-    run_warnings_msgs: tuple[str, ...] = tuple(w["message"] for w in run_warnings_list)
-
-    # F7: --dry-run redirige las escrituras a un dir temporal (si las
-    # hay) y emite un plan a stdout. NO escribe nada al destino real.
-    if dry_run:
-        import shutil
-        import tempfile
-
-        from capmd.dryrun import (
-            build_dry_run_plan,
-            render_plan_json,
-            render_plan_text,
-        )
-        from capmd.report import ReportOutput as _ReportOutput
-
-        # Snapshot del destino REAL que pidió el usuario, ANTES de
-        # cualquier redirección al tmpdir.
-        _req_out_dir = out_dir
-        _req_output = output
-
-        tmp_root: Path | None = None
-        try:
-            if _req_out_dir is not None:
-                tmp_root = Path(tempfile.mkdtemp(prefix="capmd-dryrun-"))
-                out_dir = tmp_root / _req_out_dir.name
-            elif _req_output is not None:
-                tmp_root = Path(tempfile.mkdtemp(prefix="capmd-dryrun-"))
-                output = tmp_root / _req_output.name
-
-            fmt_normalized = dry_run_format.lower()
-            if fmt_normalized not in {"json", "text"}:
-                fmt_normalized = "json"
-            _report_obj = _ReportOutput(
-                schema_version=1,
-                stats=_stats_for_warnings,
-                warnings=tuple(run_warnings_list),
-                format=fmt_normalized,
+        cleaner_stats: list[CleanerStat] = []
+        if source == "-":
+            final_markdown, cleaner_stats = _apply_clean_pipeline_to_stdin(
+                raw_markdown,
+                no_clean=no_clean,
+                only_clean=only_clean,
+                skip_clean=skip_clean,
+                ext=ext or "other",
             )
+        else:
+            final_markdown, cleaner_stats = _apply_clean_pipeline(
+                raw_markdown,
+                no_clean=no_clean,
+                only_clean=only_clean,
+                skip_clean=skip_clean,
+                target_path=target_path,
+            )
+        prog.advance(_t_clean)
+        prog.stop(_t_clean)
 
-            plan = build_dry_run_plan(
-                requested_out_dir=_req_out_dir,
-                requested_output=_req_output,
-                flat=flat,
-                split=split_normalized,
-                toc=toc,
-                toc_depth=toc_depth,
-                no_images=no_images,
-                no_anchor=no_anchor,
+        extracted_figures: list[Figure] = []
+        if not flat and (
+            no_images
+            and source != "-"
+            and path.suffix.lower() == ".pdf"
+        ):
+            final_markdown, anchor_stats = _apply_no_images_marker(
+                source_path=path,
+                engine=engine,
+                extract_pages=extract_pages,
+                chapter_index=chapter_index,
+                no_clean=no_clean,
+                only_clean=only_clean,
+                skip_clean=skip_clean,
+                keep_page_markers=keep_page_markers,
+            )
+            cleaner_stats = list(cleaner_stats) + anchor_stats
+        elif (
+            not flat
+            and not no_anchor
+            and extraction_result is not None
+            and extraction_result[0]
+        ):
+            final_markdown, anchor_stats = _apply_anchor(
+                source_path=path,
+                figures=extraction_result[0],
+                engine=engine,
+                no_clean=no_clean,
+                only_clean=only_clean,
+                skip_clean=skip_clean,
+                keep_page_markers=keep_page_markers,
+            )
+            cleaner_stats = list(cleaner_stats) + anchor_stats
+            extracted_figures = list(extraction_result[0])
+
+        if _t_imgs is not None:
+            prog.stop(_t_imgs)
+
+        elapsed_seconds = result.elapsed_seconds
+
+        if keep_raw:
+            snapshot_path = write_raw_snapshot(raw_markdown, output_path=output)
+            logger.info("snapshot crudo: %s", snapshot_path)
+            _stderr.print(f"[dim]snapshot crudo: {snapshot_path}[/dim]")
+
+        if toc:
+            from capmd.output.toc import inject_toc
+            toc_md = inject_toc(final_markdown, depth=toc_depth)
+        else:
+            toc_md = final_markdown
+
+        if out_dir is not None or output is not None:
+            file_markdown = _prepend_front_matter_for_file(
+                final_markdown=toc_md,
+                source_path=path if source != "-" else None,
+                stdin=source == "-",
+                resolved_chapter=resolved_chapter,
+                resolved_page_range=resolved_page_range,
                 no_clean=no_clean,
                 only_clean=only_clean_str,
                 skip_clean=skip_clean_str,
-                image_format=image_format,
-                source=str(path) if source != "-" else "<stdin>",
+            )
+            file_title = _resolve_file_title(
+                final_markdown=final_markdown,
+                resolved_chapter=resolved_chapter,
                 source_path=path if source != "-" else None,
                 stdin=source == "-",
-                source_format=_fmt,
-                pages=_pages,
-                size_bytes=getattr(result_reported, "size_bytes", None),
-                sha256=None,
-                resolved_chapter=resolved_chapter,
-                resolved_page_range=resolved_page_range,
-                page_offset=page_offset,
-                final_markdown=final_markdown,
-                report=_report_obj,
             )
+        else:
+            file_markdown = toc_md
+            file_title = ""
 
-            rendered = (
-                render_plan_text(plan)
-                if fmt_normalized == "text"
-                else render_plan_json(plan)
-            )
-            print(rendered)
-            return
-        finally:
-            if tmp_root is not None and tmp_root.exists():
-                shutil.rmtree(tmp_root, ignore_errors=True)
-
-    if out_dir is not None:
-        paths = _write_output_tree_or_flat(
-            out_dir=out_dir,
-            flat=flat,
-            source_path=path if source != "-" else None,
-            stdin=source == "-",
-            resolved_chapter=resolved_chapter,
-            resolved_page_range=resolved_page_range,
-            final_markdown=file_markdown,
-            title=file_title,
-            no_clean=no_clean,
-            only_clean=only_clean_str,
-            skip_clean=skip_clean_str,
+        from capmd.report import collect_stats, collect_warnings
+        _pages = getattr(result_reported, "page_count", None)
+        _path_for_format = path if source != "-" else None
+        _fmt = _source_format_from(_path_for_format, ext, source)
+        _stats_for_warnings = collect_stats(
+            raw_markdown=raw_markdown,
+            final_markdown=final_markdown,
+            pages=_pages,
+            figures_count=len(extracted_figures),
             cleaner_stats=tuple(_stats_to_dicts(cleaner_stats)),
-            figures=tuple(extracted_figures),
             elapsed_seconds=elapsed_seconds,
-            warnings=run_warnings_msgs,
-            force=force,
-            suffix=suffix,
+            source_format=_fmt,
         )
-        if paths is not None and not flat and split_normalized == "h2":
-            # F4: split por secciones H2 después de escribir el tree.
-            _write_split_sections(
-                chapter_dir=paths.markdown_path.parent,
-                final_markdown=final_markdown,
+        run_warnings_list = collect_warnings(
+            _stats_for_warnings, no_clean=no_clean, format=_fmt
+        )
+        run_warnings_msgs: tuple[str, ...] = tuple(
+            w["message"] for w in run_warnings_list
+        )
+
+        if dry_run:
+            import shutil
+            import tempfile
+
+            from capmd.dryrun import (
+                build_dry_run_plan,
+                render_plan_json,
+                render_plan_text,
+            )
+            from capmd.report import ReportOutput as _ReportOutput
+
+            _req_out_dir = out_dir
+            _req_output = output
+
+            tmp_root: Path | None = None
+            try:
+                if _req_out_dir is not None:
+                    tmp_root = Path(tempfile.mkdtemp(prefix="capmd-dryrun-"))
+                    out_dir = tmp_root / _req_out_dir.name
+                elif _req_output is not None:
+                    tmp_root = Path(tempfile.mkdtemp(prefix="capmd-dryrun-"))
+                    output = tmp_root / _req_output.name
+
+                fmt_normalized = dry_run_format.lower()
+                if fmt_normalized not in {"json", "text"}:
+                    fmt_normalized = "json"
+                _report_obj = _ReportOutput(
+                    schema_version=1,
+                    stats=_stats_for_warnings,
+                    warnings=tuple(run_warnings_list),
+                    format=fmt_normalized,
+                )
+
+                plan = build_dry_run_plan(
+                    requested_out_dir=_req_out_dir,
+                    requested_output=_req_output,
+                    flat=flat,
+                    split=split_normalized,
+                    toc=toc,
+                    toc_depth=toc_depth,
+                    no_images=no_images,
+                    no_anchor=no_anchor,
+                    no_clean=no_clean,
+                    only_clean=only_clean_str,
+                    skip_clean=skip_clean_str,
+                    image_format=image_format,
+                    source=str(path) if source != "-" else "<stdin>",
+                    source_path=path if source != "-" else None,
+                    stdin=source == "-",
+                    source_format=_fmt,
+                    pages=_pages,
+                    size_bytes=getattr(result_reported, "size_bytes", None),
+                    sha256=None,
+                    resolved_chapter=resolved_chapter,
+                    resolved_page_range=resolved_page_range,
+                    page_offset=page_offset,
+                    final_markdown=final_markdown,
+                    report=_report_obj,
+                )
+
+                rendered = (
+                    render_plan_text(plan)
+                    if fmt_normalized == "text"
+                    else render_plan_json(plan)
+                )
+                print(rendered)
+                return
+            finally:
+                if tmp_root is not None and tmp_root.exists():
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+
+        # Escritura: el conteo de "writes" depende del layout.
+        # 2 = chapter.md + capmd.json (images/ es directorio, no
+        # archivo contable en la barra). Con split se agregan sections.
+        _write_total = (1 if flat else 2) if out_dir is not None else 1
+        _t_write = prog.start("escritura", total=_write_total)
+
+        if out_dir is not None:
+            paths = _write_output_tree_or_flat(
+                out_dir=out_dir,
+                flat=flat,
+                source_path=path if source != "-" else None,
                 stdin=source == "-",
                 resolved_chapter=resolved_chapter,
                 resolved_page_range=resolved_page_range,
-                source_path=path if source != "-" else None,
+                final_markdown=file_markdown,
+                title=file_title,
                 no_clean=no_clean,
                 only_clean=only_clean_str,
                 skip_clean=skip_clean_str,
+                cleaner_stats=tuple(_stats_to_dicts(cleaner_stats)),
+                figures=tuple(extracted_figures),
+                elapsed_seconds=elapsed_seconds,
+                warnings=run_warnings_msgs,
+                force=force,
+                suffix=suffix,
             )
+            if paths is not None and not flat and split_normalized == "h2":
+                _write_split_sections(
+                    chapter_dir=paths.markdown_path.parent,
+                    final_markdown=final_markdown,
+                    stdin=source == "-",
+                    resolved_chapter=resolved_chapter,
+                    resolved_page_range=resolved_page_range,
+                    source_path=path if source != "-" else None,
+                    no_clean=no_clean,
+                    only_clean=only_clean_str,
+                    skip_clean=skip_clean_str,
+                )
+            prog.advance(_t_write)
+            prog.stop(_t_write)
+            final_md_path = (
+                paths.markdown_path
+                if paths is not None and paths.markdown_path.exists()
+                else None
+            )
+            _maybe_open_after(open_after, open_cmd, final_md_path, source=source)
+            _finalize_and_return(
+                raw_markdown=raw_markdown,
+                final_markdown=final_markdown,
+                pages=getattr(result_reported, "page_count", None),
+                figures_count=len(extracted_figures),
+                cleaner_stats=cleaner_stats,
+                elapsed_seconds=elapsed_seconds,
+                source_format=_fmt,
+                no_clean=no_clean,
+                report_format=report_format,
+                strict=strict,
+                no_warnings=no_warnings,
+                precomputed_stats=_stats_for_warnings,
+                precomputed_warnings=run_warnings_list,
+                quiet=_quiet,
+            )
+            return
+
+        if output is None:
+            typer.echo(final_markdown)
+            prog.advance(_t_write)
+            prog.stop(_t_write)
+            # Sin path escrito (stdout); ``--open`` no aplica.
+            _maybe_open_after(open_after, open_cmd, None, source=source)
+            _finalize_and_return(
+                raw_markdown=raw_markdown,
+                final_markdown=final_markdown,
+                pages=getattr(result_reported, "page_count", None),
+                figures_count=len(extracted_figures),
+                cleaner_stats=cleaner_stats,
+                elapsed_seconds=elapsed_seconds,
+                source_format=_fmt,
+                no_clean=no_clean,
+                report_format=report_format,
+                strict=strict,
+                no_warnings=no_warnings,
+                precomputed_stats=_stats_for_warnings,
+                precomputed_warnings=run_warnings_list,
+                quiet=_quiet,
+            )
+            return
+
+        from capmd.output.writer import resolve_destination_collision
+
+        output_resolved = resolve_destination_collision(
+            output, force=force, suffix=suffix, kind="file"
+        )
+        if output_resolved != output:
+            _stderr.print(f"[dim]destino versionado: {output_resolved}[/dim]")
+        output_resolved.write_text(file_markdown, encoding="utf-8")
+        logger.debug("escrito %d chars a %s", len(file_markdown), output_resolved)
+        prog.advance(_t_write)
+        prog.stop(_t_write)
+        _maybe_open_after(open_after, open_cmd, output_resolved, source=source)
         _finalize_and_return(
             raw_markdown=raw_markdown,
             final_markdown=final_markdown,
@@ -1046,53 +1352,8 @@ def convert(
             no_warnings=no_warnings,
             precomputed_stats=_stats_for_warnings,
             precomputed_warnings=run_warnings_list,
+            quiet=_quiet,
         )
-        return
-
-    if output is None:
-        typer.echo(final_markdown)
-        _finalize_and_return(
-            raw_markdown=raw_markdown,
-            final_markdown=final_markdown,
-            pages=getattr(result_reported, "page_count", None),
-            figures_count=len(extracted_figures),
-            cleaner_stats=cleaner_stats,
-            elapsed_seconds=elapsed_seconds,
-            source_format=_fmt,
-            no_clean=no_clean,
-            report_format=report_format,
-            strict=strict,
-            no_warnings=no_warnings,
-            precomputed_stats=_stats_for_warnings,
-            precomputed_warnings=run_warnings_list,
-        )
-        return
-
-    # F8: resolver colisión en `-o FILE`.
-    from capmd.output.writer import resolve_destination_collision
-
-    output_resolved = resolve_destination_collision(
-        output, force=force, suffix=suffix, kind="file"
-    )
-    if output_resolved != output:
-        _stderr.print(f"[dim]destino versionado: {output_resolved}[/dim]")
-    output_resolved.write_text(file_markdown, encoding="utf-8")
-    logger.debug("escrito %d chars a %s", len(file_markdown), output_resolved)
-    _finalize_and_return(
-        raw_markdown=raw_markdown,
-        final_markdown=final_markdown,
-        pages=getattr(result_reported, "page_count", None),
-        figures_count=len(extracted_figures),
-        cleaner_stats=cleaner_stats,
-        elapsed_seconds=elapsed_seconds,
-        source_format=_fmt,
-        no_clean=no_clean,
-        report_format=report_format,
-        strict=strict,
-        no_warnings=no_warnings,
-        precomputed_stats=_stats_for_warnings,
-        precomputed_warnings=run_warnings_list,
-    )
 
 
 def _prepend_front_matter_for_file(
@@ -2400,6 +2661,7 @@ def _finalize_and_return(
     no_warnings: bool,
     precomputed_stats: Any = None,
     precomputed_warnings: list[dict[str, Any]] | None = None,
+    quiet: bool = False,
 ) -> None:
     """F6: construye, persiste y emite el reporte de calidad al final.
 
@@ -2408,6 +2670,10 @@ def _finalize_and_return(
     ``capmd.json``). Si no, los recalcula aquí.
 
     Si ``--strict`` y hay warnings → ``typer.Exit(8)``.
+
+    Con ``--quiet`` (``quiet=True``) el reporte NO se imprime a stderr
+    pero ``--strict`` sigue evaluándose (los warnings que harían fallar
+    a CI no se silencian: el ``exit 8`` es la señal que importa).
     """
     from capmd.report import (
         ReportOutput,
@@ -2448,12 +2714,13 @@ def _finalize_and_return(
         format=fmt_normalized,
     )
 
-    formatted = (
-        render_text(report)
-        if fmt_normalized == "text"
-        else render_json(report)
-    )
-    _stderr.print(formatted)
+    if not quiet:
+        formatted = (
+            render_text(report)
+            if fmt_normalized == "text"
+            else render_json(report)
+        )
+        _stderr.print(formatted)
     if strict and report.warnings:
         raise typer.Exit(8)
 
@@ -2703,3 +2970,391 @@ def config_show(
         typer.echo(render_json(cfg), nl=False)
     else:
         typer.echo(render_table(cfg), nl=False)
+
+
+@app.command()
+@_handle_capmd_errors
+def batch(
+    ctx: typer.Context,
+    source: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="PDF o EPUB a procesar.",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    chapters: str = typer.Option(
+        ...,
+        "--chapters",
+        help=(
+            "(H2) Capítulos a convertir por índice 1-based del outline. "
+            "Sintaxis: '1-12', '1,3,5', '1-3,7,10-12'. Acepta solo rangos "
+            "cerrados y números enteros (no nombres)."
+        ),
+    ),
+    out_dir: Path = typer.Option(  # noqa: B008
+        ...,
+        "--out",
+        help=(
+            "(H2) Directorio padre del batch. ``capmd convert`` creará "
+            "``<out>/<book-slug>/<chapter-slug>/{file.md, images/, capmd.json}`` "
+            "por capítulo. Auto-creado si no existe."
+        ),
+    ),
+    jobs: int = typer.Option(
+        0,
+        "--jobs",
+        min=0,
+        max=32,
+        help=(
+            "(H2) Workers en paralelo. 0 = ``min(cpu_count, len(chapters))``. "
+            "1 = secuencial (útil para debug)."
+        ),
+    ),
+    book: str | None = typer.Option(
+        None,
+        "--book",
+        help="(G3) Perfil declarado en ``[books.\"<id>\"]`` del TOML.",
+    ),
+    page_offset: int = typer.Option(
+        0,
+        "--page-offset",
+        help="(C7) Traducción paginación impresa → física.",
+    ),
+    flat: bool = typer.Option(
+        False,
+        "--flat",
+        help="(F1) Output sin images/ ni capmd.json por capítulo.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "(F8) Sobrescribir chapter dirs existentes. Sin este flag, "
+            "``capmd convert`` falla si el destino ya existe (exit 7)."
+        ),
+    ),
+    suffix: bool = typer.Option(
+        False,
+        "--suffix",
+        help="(F8) Versionar con sufijo numérico en lugar de sobrescribir.",
+    ),
+    image_format: str = typer.Option(
+        "png",
+        "--image-format",
+        case_sensitive=False,
+        help="(E1) Formato de imágenes extraídas: 'png' o 'webp'.",
+    ),
+    image_max_width: int | None = typer.Option(
+        None,
+        "--image-max-width",
+        min=1,
+        help="(E1) Ancho máximo en píxeles para las imágenes extraídas.",
+    ),
+    filter_min_size: str | None = typer.Option(
+        None, "--filter-min-size", help="(E2) Tamaño mínimo WxH (ej: '64x64')."
+    ),
+    filter_repeat_threshold: float | None = typer.Option(
+        None,
+        "--filter-repeat-threshold",
+        min=0.0,
+        max=1.0,
+        help="(E2) Fracción de páginas para tratar una imagen como logo.",
+    ),
+    filter_background_coverage: float | None = typer.Option(
+        None,
+        "--filter-background-coverage",
+        min=0.0,
+        max=1.0,
+        help="(E2) Cobertura mínima para tratar imagen como fondo.",
+    ),
+    no_images: bool = typer.Option(
+        False,
+        "--no-images",
+        help="(E7) Saltar extracción e insertar placeholders.",
+    ),
+    no_anchor: bool = typer.Option(
+        False,
+        "--no-anchor",
+        help="(E4) No insertar ![](images/...) en el markdown.",
+    ),
+    page_markers: bool = typer.Option(
+        False,
+        "--page-markers",
+        help="(D5/E4) Conservar centinelas <!-- page N --> en el output.",
+    ),
+    no_clean: bool = typer.Option(
+        False, "--no-clean", help="(D) Saltear todos los cleaners."
+    ),
+    only_clean: str | None = typer.Option(
+        None, "--only-clean", help="(D) Lista separada por comas de cleaners a ejecutar."
+    ),
+    skip_clean: str | None = typer.Option(
+        None, "--skip-clean", help="(D) Lista separada por comas de cleaners a saltar."
+    ),
+    split: str | None = typer.Option(
+        None,
+        "--split",
+        case_sensitive=False,
+        help=(
+            "(F4) Por capítulo, parte por H2 en una subcarpeta sections/. "
+            "Solo 'h2'. Incompatible con --flat."
+        ),
+    ),
+    toc: bool = typer.Option(
+        False,
+        "--toc",
+        help="(F5) Insertar TOC al inicio del .md de cada capítulo.",
+    ),
+    toc_depth: int = typer.Option(
+        3,
+        "--toc-depth",
+        min=2,
+        max=6,
+        help="(F5) Nivel máximo de headings en la TOC.",
+    ),
+    no_registry: bool = typer.Option(
+        False,
+        "--no-registry",
+        help=("(G5) No usar el cache de outline local ni escribir el registry."),
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        is_flag=True,
+        help=(
+            "(H1) Silencia progreso y logs (gana sobre ``-v``). H2 también "
+            "omite el reporte por capítulo y el resumen final."
+        ),
+    ),
+) -> None:
+    """Convierte varios capítulos de un libro en paralelo (H2)."""
+    if force and suffix:
+        raise typer.BadParameter("--force y --suffix son mutuamente excluyentes")
+    if flat and split is not None:
+        raise typer.BadParameter("--flat y --split son mutuamente excluyentes")
+    if only_clean and skip_clean:
+        raise typer.BadParameter("--only-clean y --skip-clean son mutuamente excluyentes")
+    if split is not None and split.lower() not in {"h2", "h3"}:
+        raise typer.BadParameter(f"--split {split!r} no soportado; F4 acepta 'h2'")
+    if split is not None and split.lower() == "h3":
+        # F4 solo soporta h2; verificamos de forma explícita para mensajes claros.
+        raise typer.BadParameter("--split h3 no soportado todavía")
+
+    quiet_effective = quiet or bool(
+        ctx.obj.get("quiet", False) if ctx is not None else False
+    )
+
+    if not source.exists() or not source.is_file():
+        raise SourceNotFound(
+            f"no se encontró el archivo: {source}",
+            hint="verificá la ruta",
+        )
+    if source.suffix.lower() not in {".pdf", ".epub"}:
+        raise UnsupportedFormat(
+            f"capmd batch no soporta {source.suffix!r}; usa PDF o EPUB",
+            hint="para otros formatos, convertí con ``capmd convert``",
+        )
+
+    from capmd.batch import run_batch as _run_batch
+
+    sha = _maybe_sha256_of(source)
+    chapters_list: list[Chapter] = []
+    if source.suffix.lower() == ".pdf":
+        try:
+            chapters_list, _toc_from_outline = _read_outline_cached(
+                source,
+                sha,
+                registry_enabled=bool(
+                    ctx.obj.get("registry_enabled", not no_registry)
+                    if ctx is not None
+                    else not no_registry
+                ),
+            )
+        except Exception:
+            # Sin outline (C8 cae a heurística). Si parse_chapters_spec
+            # recibe total=0 falla con mensaje claro.
+            chapters_list = []
+
+    try:
+        indices = _parse_chapters_spec(chapters, total=len(chapters_list))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    if not indices:
+        raise typer.BadParameter(
+            "--chapters no resolvió ningún capítulo válido"
+        )
+
+    # Args comunes para cada capmd convert worker. El sub-proceso hereda
+    # el venv actual, así que ``--quiet`` se respeta localmente.
+    common_args: list[str] = []
+    if book is not None:
+        common_args += ["--book", book]
+    if page_offset:
+        common_args += ["--page-offset", str(page_offset)]
+    if flat:
+        common_args += ["--flat"]
+    if force:
+        common_args += ["--force"]
+    elif suffix:
+        common_args += ["--suffix"]
+    if image_format.lower() != "png":
+        common_args += ["--image-format", image_format]
+    if image_max_width is not None:
+        common_args += ["--image-max-width", str(image_max_width)]
+    if filter_min_size is not None:
+        common_args += ["--filter-min-size", filter_min_size]
+    if filter_repeat_threshold is not None:
+        common_args += ["--filter-repeat-threshold", str(filter_repeat_threshold)]
+    if filter_background_coverage is not None:
+        common_args += ["--filter-background-coverage", str(filter_background_coverage)]
+    if no_images:
+        common_args += ["--no-images"]
+    elif no_anchor:
+        common_args += ["--no-anchor"]
+    if page_markers:
+        common_args += ["--page-markers"]
+    if no_clean:
+        common_args += ["--no-clean"]
+    elif only_clean:
+        common_args += ["--only-clean", only_clean]
+    elif skip_clean:
+        common_args += ["--skip-clean", skip_clean]
+    if split is not None:
+        common_args += ["--split", "h2"]
+    if toc:
+        common_args += ["--toc", "--toc-depth", str(toc_depth)]
+    if no_registry:
+        common_args += ["--no-registry"]
+
+    summary = _run_batch(
+        pdf_path=source,
+        out_dir=out_dir,
+        chapter_indices=indices,
+        common_args=common_args,
+        jobs=jobs,
+        quiet=quiet_effective,
+    )
+
+    if summary.failed > 0:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+@_handle_capmd_errors
+def inspect(
+    ctx: typer.Context,
+    source: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="PDF o EPUB a diagnosticar.",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    format: str = typer.Option(
+        "text",
+        "--format",
+        case_sensitive=False,
+        help="(H3) Formato de salida: 'text' (rich table, default) o 'json'.",
+    ),
+    sample: int = typer.Option(
+        20,
+        "--sample",
+        min=1,
+        max=1000,
+        help=(
+            "(H3) Páginas a muestrear para fuentes y headers/footers. "
+            "Default: 20. Subir para más precisión en PDFs grandes."
+        ),
+    ),
+    no_outline: bool = typer.Option(
+        False, "--no-outline", help="(H3) Saltar análisis de outline."
+    ),
+    no_text: bool = typer.Option(
+        False, "--no-text", help="(H3) Saltar conteo de palabras por página."
+    ),
+    no_fonts: bool = typer.Option(
+        False, "--no-fonts", help="(H3) Saltar enumeración de fuentes."
+    ),
+    no_headers_footers: bool = typer.Option(
+        False,
+        "--no-headers-footers",
+        help="(H3) Saltar detección de headers/footers repetidos.",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        is_flag=True,
+        help="(H1) Silencia el log a stderr; stdout mantiene el reporte.",
+    ),
+) -> None:
+    """Diagnóstico estructural de un PDF sin convertirlo (H3)."""
+    fmt_norm = format.lower()
+    if fmt_norm not in {"text", "json"}:
+        raise typer.BadParameter(
+            f"--format {format!r} no soportado; usar 'text' o 'json'"
+        )
+
+    quiet_effective = quiet or bool(
+        ctx.obj.get("quiet", False) if ctx is not None else False
+    )
+
+    from capmd.inspect import inspect_pdf as _inspect_pdf
+    from capmd.inspect import render_json, render_text
+
+    report = _inspect_pdf(
+        source,
+        sample=sample,
+        include_outline=not no_outline,
+        include_text=not no_text,
+        include_fonts=not no_fonts,
+        include_headers_footers=not no_headers_footers,
+    )
+
+    if fmt_norm == "json":
+        typer.echo(render_json(report))
+    else:
+        typer.echo(render_text(report))
+
+    # Si quiet: nada a stderr (log ya está silenciado por configure_quiet).
+    _ = quiet_effective
+
+
+def _maybe_open_after(
+    open_after: bool,
+    open_cmd: str | None,
+    final_md_path: Path | None,
+    *,
+    source: str,
+) -> None:
+    """Helper de H5: si ``--open`` está activo y hay path escrito, abre."""
+    if not open_after:
+        return
+    if source == "-":
+        # Sin archivo al disco; ``capmd open`` cubre el caso de re-abrir.
+        typer.echo(
+            "[yellow]--open: sin archivo en disco (stdin). "
+            "Usá ``capmd open <file>`` después de convertir.[/yellow]",
+            err=True,
+        )
+        return
+    if final_md_path is None or not final_md_path.exists():
+        typer.echo(
+            "[yellow]--open: no se pudo determinar el archivo a abrir.[/yellow]",
+            err=True,
+        )
+        return
+    from capmd.open import open_in_editor
+
+    try:
+        open_in_editor(final_md_path, editor=open_cmd)
+    except typer.BadParameter as exc:
+        raise typer.BadParameter(f"--open: {exc}") from None
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(
+            f"--open: editor no encontrado ({exc.filename or exc.strerror}). "
+            "Verificá $EDITOR o --open-cmd."
+        ) from None

@@ -1,4 +1,4 @@
-"""Tests del logging (A4)."""
+"""Tests del logging (A4) y de ``--quiet`` (H1)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from capmd import __version__
 from capmd.cli import app
-from capmd.logging import configure_logging, get_logger
+from capmd.logging import configure_logging, configure_quiet, get_logger
 
 
 def setup_function(_: object) -> None:
@@ -107,3 +107,40 @@ def test_version_command_still_works() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert f"capmd {__version__}" in result.stdout
+
+
+# --- H1: configure_quiet -----------------------------------------------
+
+
+def test_configure_quiet_sets_critical_level() -> None:
+    configure_quiet()
+    assert get_logger().level == logging.CRITICAL
+
+
+def test_configure_quiet_overrides_verbose() -> None:
+    """El orden del root callback es ``configure_logging(verbose)`` y
+    luego ``configure_quiet()`` cuando ``--quiet`` está activo. ``quiet``
+    debe pisar el nivel resultante de ``-vv``.
+    """
+    configure_logging(2)  # simula -vv
+    assert get_logger().level == logging.DEBUG
+    configure_quiet()
+    assert get_logger().level == logging.CRITICAL
+
+
+@pytest.mark.parametrize("level", ["debug", "info", "warning", "error"])
+def test_quiet_suppresses_all_log_levels(
+    capsys: pytest.CaptureFixture[str], level: str
+) -> None:
+    """Ningún nivel por debajo de CRITICAL debe llegar a stderr."""
+    configure_quiet()
+    logger = get_logger()
+    getattr(logger, level)(f"{level} msg")
+    captured = capsys.readouterr()
+    assert f"{level} msg" not in captured.err
+
+
+def test_configure_quiet_is_idempotent() -> None:
+    configure_quiet()
+    configure_quiet()
+    assert get_logger().level == logging.CRITICAL
