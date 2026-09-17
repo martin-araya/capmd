@@ -107,10 +107,10 @@ def _is_background(
         return False
     page_area = page_areas.get(cand.page)
     if page_area is None:
-        return False
+        return False  # pragma: no cover
     page_w, page_h = page_area
     if page_w <= 0 or page_h <= 0:
-        return False
+        return False  # pragma: no cover
     _, _, bw, bh = cand.bbox
     bbox_area = bw * bh
     page_total = page_w * page_h

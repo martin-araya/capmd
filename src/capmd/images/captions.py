@@ -81,7 +81,7 @@ def find_caption_in_window(
         offset += 1
         if offset > 1000:
             # defensa contra inputs patológicos.
-            break
+            break  # pragma: no cover
     return None
 
 
