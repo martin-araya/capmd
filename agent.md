@@ -56,14 +56,14 @@ src/capmd/
 ```bash
 pytest                       # todo (corre coverage con --cov-fail-under=90)
 pytest tests/clean           # un bloque
-pytest --update-golden       # regenerar expectativas de los cleaners
+pytest --update-golden       # regenerar los golden files (J2)
 pytest --cov=capmd.X --cov-fail-under=100 tests/test_X.py   # 100% en un módulo
 ruff check . && mypy src/capmd
 ```
 
 Coverage está wired en `pyproject.toml` (`[tool.coverage.run/report]`). `--cov-fail-under=90` falla el build si baja del umbral. Las excepciones defensivas inalcanzables se marcan con `# pragma: no cover` en el código. Los tests de J1 viven en `tests/test_j1_coverage_gaps.py` + `tests/test_j1_coverage_inspect.py`.
 
-Los golden files viven en `tests/golden/`. Si un cambio altera un golden, **revisar el diff a mano** antes de regenerarlo: el diff es la evidencia de si el cleaner mejoró o rompió algo.
+Los **golden files (J2)** viven en `tests/golden/test_golden_pipeline/*.md`. Cada uno es el output esperado de correr `Engine.convert_path(pdf) → default_pipeline.run(...)` sobre uno de los 14 fixtures de `tests/fixtures/build.py`. La mecanica usa [syrupy 4.x](https://github.com/syrupy-project/syrupy) con un `MarkdownSnapshotExtension` custom definido en `tests/conftest.py`. `--update-golden` es sinonimo de `--snapshot-update` (el conftest inyecta la traduccion). Si un cambio altera un golden, **revisar el diff a mano** antes de regenerarlo.
 
 ## Shell completion (zsh por default en macOS)
 

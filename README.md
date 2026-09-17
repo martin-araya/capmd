@@ -657,7 +657,7 @@ El recorte por capítulo funciona en **PDF** (outline o heurística) y **EPUB** 
 ```bash
 uv pip install -e '.[dev]'
 pytest                      # suite completa (corre coverage + tests)
-pytest --update-golden      # regenerar los golden files de los cleaners
+pytest --update-golden      # regenerar los golden files (J2)
 ruff check . && ruff format .
 mypy src/capmd
 ```
@@ -672,6 +672,17 @@ open htmlcov/index.html               # inspeccionar branches no cubiertos
 pytest --no-cov                       # solo tests, sin coverage (más rápido)
 pytest tests/test_clean_headers.py    # un módulo específico
 pytest --cov=capmd.clean --cov-fail-under=100 tests/test_clean_headers.py   # 100% en un archivo
+```
+
+### Golden files (J2)
+
+Cada fixture sintético de `tests/fixtures/build.py` produce un `.md` golden bajo `tests/golden/test_golden_pipeline/<fixture>.md`. Cualquier cambio en un cleaner que altere el output se ve como diff al correr `pytest`. Regenerar los 14 goldens:
+
+```bash
+pytest --update-golden tests/test_golden_pipeline.py     # alias de --snapshot-update de syrupy
+```
+
+Los `.md` son archivos versionados — **revisar el diff a mano** antes de regenerarlos: el diff es la evidencia de si el cleaner mejoró o rompió algo. El mecanismo usa [syrupy 4.x](https://github.com/syrupy-project/syrupy) con un `MarkdownSnapshotExtension` custom (`tests/conftest.py`) que apunta los snapshots a `tests/golden/` en lugar del `__snapshots__/` default.
 ```
 
 Las excepciones defensivas (ej: `except Exception: pass` dentro de pools de pypdfium2 o file-locks de fcntl) se marcan con `# pragma: no cover` quirúrgicamente. El módulo está completo en `tests/test_j1_coverage_gaps.py`, `tests/test_j1_coverage_inspect.py`, `tests/test_clean_noop.py` y `tests/test_convert_limits.py`.
