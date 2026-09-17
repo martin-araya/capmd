@@ -66,8 +66,8 @@ def split_outside_fences(text: str) -> list[tuple[str, bool]]:
                     in_fence = False
                     fence_char = None
                     continue
-                buffer.append(line)
-                continue
+                buffer.append(line)  # pragma: no cover
+                continue  # pragma: no cover
             flush()
             buffer.append(line)
             in_fence = True

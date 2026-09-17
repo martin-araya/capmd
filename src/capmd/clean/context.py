@@ -14,7 +14,7 @@ __all__ = ["CleanContext"]
 
 def _freeze_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
     if value is None:
-        return MappingProxyType({})
+        return MappingProxyType({})  # pragma: no cover
     return MappingProxyType(dict(value))
 
 

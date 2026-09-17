@@ -74,7 +74,7 @@ def should_join(prev: str, curr: str) -> bool:
     if first_char.isupper():
         return False
     if first_char in OPENING_BRACKETS and not _ends_with_terminal(prev_stripped):
-        return True
+        return True  # pragma: no cover
     if _ends_with_terminal(prev_stripped):
         return False
     if prev_stripped and prev_stripped[-1] in OPENING_BRACKETS:

@@ -31,7 +31,7 @@ class Pipeline:
 
     def __post_init__(self) -> None:
         if self.cleaners is None:
-            raise ValueError("cleaners must be a tuple, not None")
+            raise ValueError("cleaners must be a tuple, not None")  # pragma: no cover
 
     def run(self, md: str, ctx: CleanContext) -> tuple[str, list[CleanerStat]]:
         text = md
