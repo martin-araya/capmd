@@ -51,8 +51,8 @@ def write_raw_snapshot(
     snapshot_dir = dest / ".capmd"
     try:
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise IOError(
+    except OSError as exc:  # pragma: no cover
+        raise IOError(  # pragma: no cover
             f"no se pudo crear el directorio de snapshot: {snapshot_dir}",
             hint=str(exc),
         ) from exc

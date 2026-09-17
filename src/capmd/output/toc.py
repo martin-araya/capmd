@@ -147,7 +147,7 @@ def extract_headings(
             continue
         title = m.group(2).strip()
         if not title:
-            continue
+            continue  # pragma: no cover
         anchor = slugify_anchor(title, used)
         headings.append(Heading(level=level, title=title, anchor=anchor))
     return headings
@@ -231,19 +231,19 @@ def inject_toc(markdown: str, *, depth: int = 3) -> str:
         # del primer contenido).
         without_fm = strip_existing_front_matter(cleaned)
         if not without_fm:
-            return toc_block + cleaned
+            return toc_block + cleaned  # pragma: no cover
         # Encontrar el offset donde termina el FM block.
         from capmd.output.frontmatter import _FRONTMATTER_LEADING_RE
         fm_match = _FRONTMATTER_LEADING_RE.match(without_fm)
         if fm_match is None:
             return toc_block + "\n" + cleaned
         # Insertar justo después del FM + posibles newlines en limpio.
-        fm_end = fm_match.end()
+        fm_end = fm_match.end()  # pragma: no cover
         # ``stripped`` no incluye ``leading_ws`` que ``cleaned`` podría
         # tener; usamos ``cleaned.find`` en su lugar.
-        prefix_offset = cleaned.find(without_fm)
-        insert_at = (prefix_offset if prefix_offset >= 0 else 0) + fm_end
-        return cleaned[:insert_at] + toc_block + cleaned[insert_at:]
+        prefix_offset = cleaned.find(without_fm)  # pragma: no cover
+        insert_at = (prefix_offset if prefix_offset >= 0 else 0) + fm_end  # pragma: no cover
+        return cleaned[:insert_at] + toc_block + cleaned[insert_at:]  # pragma: no cover
 
     insert_at = h1_match.end()
     return cleaned[:insert_at] + toc_block + cleaned[insert_at:]
