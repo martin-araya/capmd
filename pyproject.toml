@@ -23,6 +23,7 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
   "Topic :: Text Processing :: Markup :: Markdown",
 ]
 dependencies = [
@@ -54,6 +55,8 @@ capmd = "capmd.cli:app"
 [project.urls]
 Homepage = "https://github.com/martin-araya/capmd"
 Issues = "https://github.com/martin-araya/capmd/issues"
+Changelog = "https://github.com/martin-araya/capmd/blob/main/CHANGELOG.md"
+Source = "https://github.com/martin-araya/capmd"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/capmd"]
