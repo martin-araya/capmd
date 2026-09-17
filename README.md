@@ -46,7 +46,7 @@ pipx install capmd
 Desde el código:
 
 ```bash
-git clone https://github.com/<tu-usuario>/capmd.git
+git clone https://github.com/martin-araya/capmd.git
 cd capmd
 uv venv --python=3.12 .venv
 source .venv/bin/activate
@@ -70,6 +70,316 @@ capmd convert escaneado.pdf --chapter 3 --describe-images
 ```
 
 Sin cliente LLM configurado, `capmd` avisa una vez y sigue con el converter estándar.
+
+### Verificar la instalación
+
+El binario queda en `PATH` y corre sin un venv activo:
+
+```bash
+which capmd                  # ~/.local/bin/capmd (con uv tool) o ~/.local/bin/capmd (con pipx)
+capmd version                # imprime la versión de importlib.metadata
+capmd --help                 # usage con subcomandos: convert, toc, batch, config, ...
+capmd --install-completion zsh   # opcional: instala completions del shell
+```
+
+Para reproducir el smoke test en una máquina limpia (macOS o Linux) desde el source:
+
+```bash
+git clone https://github.com/martin-araya/capmd.git
+cd capmd
+bash scripts/verify-install.sh
+```
+
+### Desinstalar
+
+```bash
+# con uv tool:
+uv tool uninstall capmd
+
+# con pipx:
+pipx uninstall capmd
+
+# con brew:
+brew uninstall capmd
+```
+
+### Homebrew (alternativa recomendada en macOS)
+
+```bash
+brew tap martin-araya/capmd
+brew install capmd
+```
+
+Resuelve en ~30 s en una Mac Apple Silicon limpia: Homebrew instala `python@3.12`,
+la fórmula declara 9 recursos de PyPI (typer, markitdown, pypdf, pypdfium2,
+pyyaml, pillow, ebooklib, symspellpy, rich) que se instalan dentro del venv de Homebrew,
+y descarga el binario pre-compilado (.bottle.tar.gz) del release tag.
+
+Las botellas viven en el [GitHub Release de vX.Y.Z](https://github.com/martin-araya/capmd/releases)
+con `root_url = https://github.com/martin-araya/capmd/releases/download/vX.Y.Z/`.
+Targets soportados en este MVP: `arm64_sonoma` (macOS 14) y `arm64_sequoia` (macOS 15).
+Intel Macs deben usar `uv tool install capmd` en su lugar.
+
+---
+
+## Quick Action de Finder (I2)
+
+Click derecho sobre un PDF en Finder → *Quick Actions* → **Convert capmd chapter**.
+El atajo te pide rango (capítulo o páginas) y carpeta de salida (default
+`~/Downloads/capmd`), y corre `capmd convert` por cada PDF seleccionado. Soporta
+multi-selección. Si `capmd` no está instalado, el atajo aborta con un mensaje
+claro apuntando a esta sección del README.
+
+### Instalar
+
+```bash
+capmd setup quick-action            # instala (default)
+capmd setup quick-action --dry-run  # preview: muestra qué se haría
+capmd setup quick-action --print-cmd
+capmd setup quick-action --uninstall
+```
+
+`--install` corre `open` contra el `.shortcut` que viene empaquetado. macOS
+Shortcuts.app muestra su hoja estándar "Add Shortcut"; hacé click en **Add** (o
+**Configure** si querés revisar el grafo antes) y el atajo queda disponible en el
+menú right-click.
+
+### Verificar el Quick Action (test literal del roadmap)
+
+1. Asegurate de tener un PDF a mano (cualquier PDF).
+2. Click derecho sobre el PDF en Finder → *Quick Actions* → *Convert capmd chapter*.
+3. Ingresá un rango (ej: `1-3`).
+4. Confirmá la carpeta de salida (Enter para default `~/Downloads/capmd`).
+5. Esperá la notificación "capmd: terminado".
+6. La carpeta de salida tiene que contener un árbol `cap-XX-…/cap-XX-….md`.
+
+El atajo recuerda el último rango y la última carpeta (persiste en
+`$XDG_STATE_HOME/capmd/quickaction-last.txt` o `~/.local/state/capmd/`).
+
+### Cómo está construido
+
+El `.shortcut` se **hand-rolla** con `plistlib` desde
+`scripts/build-quick-action.py` y se committea en
+`src/capmd/assets/Convert capmd chapter.shortcut`. El grafo es deliberadamente
+mínimo (un único Run Shell Script) para evitar el schema-rot de las acciones
+built-in de Shortcuts entre versiones de macOS. Los prompts, el parseo de
+rango y la invocación a `capmd` viven en `src/capmd/setup_quickaction.py`
+(expuesto como `SHELL_SCRIPT` en `scripts/build-quick-action.py`).
+
+Para iterar sobre el grafo en Shortcuts.app:
+
+```bash
+# 1. Abrilo en la app para edición visual
+open src/capmd/assets/Convert\ capmd\ chapter.shortcut
+
+# 2. Hacé cambios en la GUI
+
+# 3. Exportalo y regenerá el asset con:
+shortcuts view "Convert capmd chapter"   # abre el shortcut local
+# … y exportarlo a File → Export, sobreescribiendo el asset committeado.
+
+# 4. Rebuild defensivo (no necesario si lo exportás en binary plist):
+python scripts/build-quick-action.py
+```
+
+Para regenerar el `.shortcut` desde Python sin tocar Shortcuts.app:
+
+```bash
+python scripts/build-quick-action.py
+# por default escribe en src/capmd/assets/Convert capmd chapter.shortcut
+
+# Opcional: firmar con `shortcuts sign --mode anyone` para evitar la hoja de firma
+# al distribuir el archivo (sólo relevante fuera del wheel).
+```
+
+---
+
+## Carpeta watch (I3, opcional)
+
+`capmd watch` observa una carpeta y convierte automáticamente todo PDF/EPUB/DOCX
+que caiga ahí, moviendo el original a `Processed/` cuando termina. Pensado para
+"soltar el libro y olvidarse" — la conversión arranca en ≤ 1 s de polling (default
+0.5 s) más la duración de la conversión manual.
+
+### Uso directo
+
+```bash
+capmd watch \
+    --inbox  ~/Books/Inbox \
+    --out    ~/Estudio \
+    --move-to ~/Books/Processed
+```
+
+Flags:
+
+- `--inbox <dir>` — carpeta a observar (requerida).
+- `--out <dir>` — donde `capmd convert` deja el markdown (requerida).
+- `--move-to <dir>` — donde van los originales ya procesados (default: `<inbox>/Processed`).
+- `--pattern <glob>` — uno o más globs aceptados (default: `*.pdf *.epub *.docx *.doc`). Repetible.
+- `--debounce <secs>` — segundos a esperar antes de considerar 'estable' un archivo (default: 2.0).
+- `--poll-interval <secs>` — intervalo del polling (default: 0.5).
+- `--dry-run` — loguea qué se haría sin convertir ni mover.
+
+Si una conversión falla, el original **queda en el inbox** para reintento manual
+(el watcher no es agresivo: es mejor que un libro no se pierda a que se pierda
+silenciosamente).
+
+### LaunchAgent (auto-start al login)
+
+Para que el watcher arranque solo cada vez que iniciás sesión:
+
+```bash
+capmd setup launch-agent \
+    --inbox   ~/Books/Inbox \
+    --out     ~/Estudio \
+    --move-to ~/Books/Processed
+```
+
+Esto:
+
+1. Resuelve la ruta al binario de `capmd` (via `shutil.which`).
+2. Escribe `~/Library/LaunchAgents/com.martinaraya.capmd-watch.plist` con los
+   args correctos.
+3. Crea `~/Library/Logs/capmd/` para los logs.
+4. Corre `launchctl load -w <plist>` (queda registrado para los próximos logins).
+
+Flags adicionales:
+
+- `--reinstall` — uninstall + install con el binario de capmd actual (útil si
+  reinstalaste capmd en otra ruta).
+- `--uninstall` — descarga y borra el agente.
+- `--dry-run` / `--print-cmd` — preview sin tocar nada.
+
+El `.plist` generado:
+
+- `RunAtLoad = true` (arranca al login).
+- `KeepAlive.Crashed = true` (si crashea, launchd lo levanta de nuevo; pero NO
+  si sale con código 0, que es el caso normal cuando hacés `launchctl unload`).
+- `StandardOutPath`/`StandardErrorPath` → `~/Library/Logs/capmd/capmd-watch.{out,err}.log`.
+
+### Por qué polling en vez de FSEvents
+
+Se evaluó `watchdog` (que usa FSEvents nativo en macOS) y se descartó: el
+polling de 0.5 s cumple el SLA del roadmap ("≤ el tiempo de una conversión
+manual") sin agregar dependencias, y `agent.md` veta deps nuevas sin justificación.
+Si en el futuro hace falta reactividad < 100 ms, :func:`capmd.watch.iter_events`
+se puede reimplementar encima de `watchdog.observers.Observer` sin tocar el resto.
+
+### Verificar el Watch (test literal del roadmap)
+
+1. Asegurate de tener `capmd watch` corriendo (en foreground o via LaunchAgent).
+2. Soltá un PDF en la carpeta `--inbox`.
+3. Esperá la notificación de macOS ("Application downloaded file") o revisá
+   la carpeta `--move-to`.
+4. El original aparece en `Processed/`; el markdown aparece bajo `--out`.
+
+Tiempo esperado: `poll_interval + tiempo de conversión manual`. Con defaults
+(0.5 s + ~0.6 s para un PDF de fixture): **~1.1 s** entre soltar y ver el markdown.
+
+---
+
+## Homebrew tap (I4)
+
+`capmd` se distribuye también como fórmula de Homebrew en un tap in-repo:
+`Formula/capmd.rb` dentro de `martin-araya/capmd`. Esto significa que un usuario
+puede hacer `brew install martin-araya/capmd/capmd` y resolver todo (Python 3.12
++ 9 deps nativas + binario pre-compilado) en ~30 s en una Mac limpia.
+
+### Estructura
+
+```text
+capmd/
+└── Formula/
+    └── capmd.rb          # la fórmula Homebrew
+```
+
+### Releases con botellas firmadas
+
+Las botellas pre-compiladas viven en el GitHub Release de cada tag:
+
+```text
+vX.Y.Z
+├── capmd-X.Y.Z.tar.gz                       # sdist (wheel/sdist son también assets)
+├── capmd-X.Y.Z-py3-none-any.whl             # wheel
+└── capmd-X.Y.Z.arm64_<sonoma|sequoia>.bottle.tar.gz   # bottle firmada
+```
+
+`Formula/capmd.rb` declara un `bottle do … end` block con el sha256 de cada
+target; cuando `brew install` ve que target está disponible, descarga la bottle
+y la descomprime; si no, hace `--build-from-source` (lo cual tarda minutos).
+
+### Para el maintainer: hacer un release
+
+```bash
+# 1. Asegurate de que el working tree está limpio.
+git status
+git pull --rebase
+
+# 2. Bump de versión (a mano o con tu editor de confianza).
+$EDITOR pyproject.toml   # version = "0.1.1"
+
+# 3. Corre el release script.  Hace todo: build, sdist sha256, Fórmula patch,
+#    bottles, tag, push, GitHub Release.
+scripts/release.sh 0.1.1
+
+# 4. En otra macOS limpia, valida el test "instalación limpia" (§ siguiente).
+```
+
+### Test "instalación limpia en cuenta macOS distinta" (literal del roadmap)
+
+Para validar la fórmula antes de un release:
+
+1. En tu Mac, creá un usuario nuevo: **System Settings → Users & Groups → Add User**
+   (rol: Standard, sin acceso admin).
+2. **Log out** y logueate como el nuevo usuario (la sesión no comparte estado con
+   la tuya — el `~/.cache`, `~/Library`, etc., están vacíos).
+3. Instalá Homebrew (con el usuario nuevo):
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
+4. Tapeá e instalá:
+   ```bash
+   brew tap martin-araya/capmd
+   brew install capmd
+   ```
+5. Smoke test del binario:
+   ```bash
+   which capmd          # /opt/homebrew/bin/capmd
+   capmd version        # capmd X.Y.Z
+   capmd --help         # usage con subcomandos
+   capmd convert <cualquier.pdf> -o /tmp/capmd-test  # exit 0
+   head /tmp/capmd-test/<…>/full.md  # markdown generado
+   ```
+6. (Opcional) Probar las deps instaladas vía Homebrew:
+   ```bash
+   brew list capmd
+   ls /opt/homebrew/Cellar/capmd/X.Y.Z/bin/capmd
+   ```
+
+Tiempos esperados en una Mac Apple Silicon limpia:
+
+| Etapa | Tiempo | Notas |
+|---|---|---|
+| `brew install capmd` | 10–30 s | Si la bottle del target está disponible. |
+| `brew install --build-from-source capmd` | 3–8 min | Si el target NO tiene bottle. |
+| Primer `capmd --version` | < 1 s | Venv warm-up. |
+| `capmd convert <pdf>` | ~0.6 s | PDF de 2 páginas. |
+
+### Multi-target: arm64_sonoma + arm64_sequoia
+
+La fórmula declara:
+
+```ruby
+bottle do
+  sha256 arm64_sonoma:  "<sha>"
+  sha256 arm64_sequoia: "<sha>"
+end
+```
+
+El MVP del I4 genera la bottle del OS del maintainer. Para una segunda variante
+(ej: maintainer corre en Sequoia, necesita bottles para Sonoma), usar una VM del
+target macOS, o `brew test-bot` desde otra cuenta, y correr `build-bottles.sh`
+allí. Documentado como follow-up.
 
 ---
 
@@ -292,13 +602,9 @@ compinit
 ```
 
 
-**Atajo / Quick Action.** Click derecho sobre un PDF en Finder → *Convertir capítulo a Markdown*. El Atajo pide el rango y llama a `capmd`.
+**Atajo / Quick Action.** Click derecho sobre un PDF en Finder → *Quick Actions* → *Convert capmd chapter*. Instalalo con `capmd setup quick-action`. Detalle completo en la sección [Quick Action de Finder (I2)](#quick-action-de-finder-i2) más arriba.
 
-**Carpeta observada.** Un LaunchAgent puede vigilar `~/Books/Inbox` y convertir todo lo que caiga ahí:
-
-```bash
-capmd watch ~/Books/Inbox --out ~/Estudio --move-to ~/Books/Processed
-```
+**Carpeta observada.** Lanzá `capmd watch` (o instalalo como LaunchAgent) para que vigile `~/Books/Inbox` y convierta lo que caiga ahí. Detalle completo en la sección [Carpeta watch (I3)](#carpeta-watch-i3-opcional) más arriba.
 
 **Hook post-conversión.** En la config:
 
