@@ -647,9 +647,30 @@ Out of scope explícito (no se hace en J1):
 - J2 (golden files): no se crea `tests/golden/`; la suite usa assertions explícitos + fixtures generados.
 - Branch coverage al 90%: documentado pero no enforced. El comando para hacerlo cuando se quiera endurecer: cambiar `precision = 1` por `--cov-branch` en `addopts` y bajar `--cov-fail-under` a ~85.
 
-**J2. Tests de regresión con golden files**
-Guardar el `.md` esperado de cada fixture; cualquier cambio de cleaner que altere el golden exige actualizarlo a mano.
-*Test:* `pytest --update-golden` regenera; sin el flag, el diff falla.
+**✅ J2. Tests de regresión con golden files**
+Cada fixture de `tests/fixtures/build.py` produce un `.md` golden bajo `tests/golden/test_golden_pipeline/<fixture>.md`. Cualquier cambio en un cleaner que altere el output se ve como diff en `pytest`. Regenerar manualmente con `pytest --update-golden` (alias de `--snapshot-update` de syrupy via el conftest). Mecánica: plugin **syrupy 4.9.1** con un `MarkdownSnapshotExtension` custom que apunta snapshots a `tests/golden/` (en vez del default `__snapshots__/<test>.ambr`).
+*Test:* `pytest tests/test_golden_pipeline.py` verde y `--update-golden` regenera los 14 `.md` idempotentemente. ✅ 14/14 snapshots pass + mutation test (cambiar `RE_H1_CHAPTER` a regex sin match) hace fallar 5/14 goldens correctamente.
+
+Implementado en:
+- `pyproject.toml:42-48` — `syrupy>=4.6,<5` agregado a dev deps (asset y CLI ya son dev-only; cumple la regla "no deps sin justificación" porque syrupy da assertion syntax + auto-update + diff UI built-in).
+- `tests/conftest.py` (nuevo, ~50 LoC) — `pytest_addoption` registra `--update-golden`; `pytest_configure` lo traduce a `config.option.update_snapshots = True` (dest correcto de syrupy 4.x, NO `snapshot_update`); redefine el fixture `snapshot` con `snapshot.use_extension(MarkdownSnapshotExtension)`; `MarkdownSnapshotExtension` hereda de `SingleFileSnapshotExtension` con `_file_extension = "md"` + `_write_mode = WriteMode.TEXT` + override de `dirname()` que retorna `tests/golden/<test_module>/` para satisfacer `test_location.matches_snapshot_location`.
+- `tests/golden/__init__.py` (nuevo) — package marker; los `.md` viven en `tests/golden/test_golden_pipeline/` (un subdir por test file para que el chequeo de syrupy no emita warnings).
+- `tests/test_golden_pipeline.py` (nuevo, ~150 LoC) — 14 tests paramétricos (headings, four_h2, header_footer, cut_hyphens, two_images, outline_image, logo_repeated, midpage_image, table, many_pages, outline_toc, no_outline, epub_3chapters, scanned) + 1 smoke test (`test_golden_pipeline_cleaner_diff_triggers`). Cada test paramétrico corre `Engine.convert_path(pdf) → default_pipeline.run(md, ctx)`, normaliza timestamps y page markers via `_strip_volatile(md)` (regex sobre ISO 8601 + `<!-- page N -->`), y compara con `snapshot(name=<fixture>)`. `build_many_pages_pdf` se reduce de `n_pages=500` a `n_pages=10` en el wrapper para no demorar la suite.
+- `tests/golden/test_golden_pipeline/*.md` (nuevos, x14) — bootstrap generado por `pytest --update-golden tests/test_golden_pipeline.py` y revisados a mano antes del commit.
+
+Validación final:
+- `pytest tests/test_golden_pipeline.py` → 14/14 snapshots pass + 1 smoke test (15 passed total).
+- `pytest --update-golden tests/test_golden_pipeline.py` → 14 snapshots generated, idempotente si nada cambia.
+- `pytest --cov=capmd --cov-report=term`: `TOTAL ... 99.4%` (sin regresión; los nuevos archivos están en `tests/` que no entra en `source = ["src/capmd"]`).
+- **Mutation test**: cambiar `RE_H1_CHAPTER` en `src/capmd/clean/headings.py:45` a regex sin match → 5/14 goldens fallan (`headings`, `four_h2`, `outline_image`, `outline_toc`, `no_outline`) con diff legible. Confirma que el mecanismo captura cambios reales en cleaners.
+- `ruff check src tests`: All checks passed.
+- `mypy src/capmd`: Success, no issues found in 67 source files.
+
+Out of scope explícito (no se hace en J2):
+- J3 (SemVer/changelog).
+- J4 (publicación PyPI real).
+- J5 (`docs/cleaners.md`).
+- K1 (plugin markitdown) y siguientes.
 
 **J3. Versionado y changelog**
 SemVer, changelog generado desde commits convencionales.
