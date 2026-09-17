@@ -9,6 +9,12 @@
 #   release-notes-file  Path a un .md con notas.  Si no se pasa, lo genera
 #                       automáticamente desde los commits desde el último tag.
 #
+# J3 (Sept 2026): el tag + push ya NO se hace acá; ahora el maintainer tag-ea
+# (`git tag -a vX.Y.Z -m "..."`) y el hook `scripts/hooks/post-tag` invoca este
+# script para terminar el release. Mantener el script autocontenido via
+# `scripts/release.sh X.Y.Z` (sin tag previo) sigue funcionando para emergencias:
+# en ese caso crea el tag al final y omite el push.
+#
 # Pre-requisitos:
 #   - brew, git, gh autenticado (`gh auth status` verde), uv o python con build/
 #   - Working tree limpio (sin cambios sin commitear)
@@ -131,21 +137,30 @@ echo "[release] notas en: $NOTES_FILE"
 echo "[release] corriendo scripts/build-bottles.sh"
 scripts/build-bottles.sh
 
-# 8. Commit + tag
+# 8. Commit cambios de release (Formula + dist + pyproject).
 echo "[release] comiteando cambios de release"
 git add Formula/capmd.rb dist/ pyproject.toml 2>/dev/null || true
 if [ -n "$(git status --porcelain)" ]; then
   git commit -m "release: v$VERSION"
 fi
-git tag -a "v$VERSION" -F "$NOTES_FILE"
 
-# 9. Push tag
+# 9. Tag + push. El camino normal es via el hook post-tag, pero si el script
+#    se invoca manualmente (release.sh X.Y.Z), tag-eamos acá.
+TAG_REF="refs/tags/v${VERSION}"
+if git show-ref --verify --quiet "$TAG_REF"; then
+  echo "[release] tag v$VERSION ya existe localmente (probablemente creado por el hook post-tag). Skip."
+else
+  echo "[release] creando tag v$VERSION"
+  git tag -a "v$VERSION" -F "$NOTES_FILE"
+fi
+
+# 10. Push tag
 echo "[release] pusheando tag v$VERSION (confirmá en 10s o Ctrl-C)"
 sleep 10
 git push origin main
 git push origin "v$VERSION"
 
-# 10. Crear GitHub Release + upload assets
+# 11. Crear GitHub Release + upload assets
 echo "[release] creando GitHub Release v$VERSION"
 ASSETS=(
   "dist/capmd-${VERSION}.tar.gz"

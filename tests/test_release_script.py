@@ -138,8 +138,25 @@ def test_release_sh_invokes_build_bottles() -> None:
 
 def test_release_sh_creates_git_tag_and_pushes() -> None:
     text = _text(RELEASE_SH)
-    assert "git tag" in text
+    # J3: el tag se crea via hook post-tag; release.sh SOLO tag-ea en fallback
+    # (cuando se invoca manualmente sin tag previo). Verifica que ambos paths
+    # siguen funcionando: el push del tag y el condicional de creación.
     assert "git push" in text
+    assert "git show-ref" in text, (
+        "release.sh debe verificar si el tag existe antes de crearlo "
+        "(J3: el hook post-tag normalmente crea el tag primero)"
+    )
+    assert 'git tag -a "v$VERSION"' in text or 'git tag -a "v${VERSION}"' in text, (
+        "release.sh debe poder tag-ear en fallback cuando no hay hook"
+    )
+
+
+def test_release_sh_handles_existing_tag_gracefully() -> None:
+    """Si el tag ya existe (caso normal post-hook), release.sh skip-ea el create."""
+    text = _text(RELEASE_SH)
+    assert "tag v$VERSION ya existe" in text or "tag v${VERSION} ya existe" in text, (
+        "release.sh debe skip-ear la creación del tag si el hook ya lo creó"
+    )
 
 
 def test_release_sh_creates_github_release_with_assets() -> None:
