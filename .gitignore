@@ -17,3 +17,8 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+# Local project config (created by `capmd config init` when run from repo root)
+capmd.toml
+# Sphinx build output
+docs/_build/
+
