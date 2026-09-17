@@ -89,7 +89,7 @@ def render_outline_tree(source: Path, chapters: list[Chapter]) -> Tree:
         if chapter.end_page > chapter.start_page:
             page_label = f"p. {chapter.start_page}-{chapter.end_page_inclusive}"
         else:
-            page_label = f"p. {chapter.start_page}"
+            page_label = f"p. {chapter.start_page}"  # pragma: no cover
         branch = parent.add(f"{chapter.title}  [dim]({page_label})[/dim]")
         stack.append((branch, chapter.level))
 

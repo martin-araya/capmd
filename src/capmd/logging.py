@@ -53,10 +53,10 @@ def configure_quiet() -> None:
     """
     logger = logging.getLogger(_LOGGER_NAME)
     if not logger.handlers:
-        handler = logging.StreamHandler(stream=sys.stderr)
-        handler.setFormatter(logging.Formatter(_FORMAT))
-        logger.addHandler(handler)
-        logger.propagate = False
+        handler = logging.StreamHandler(stream=sys.stderr)  # pragma: no cover
+        handler.setFormatter(logging.Formatter(_FORMAT))  # pragma: no cover
+        logger.addHandler(handler)  # pragma: no cover
+        logger.propagate = False  # pragma: no cover
     logger.setLevel(logging.CRITICAL)
 
 

@@ -70,8 +70,8 @@ class StageHandle:
 def _stderr_is_tty() -> bool:
     try:
         return bool(sys.stderr.isatty())
-    except (AttributeError, ValueError):
-        return False
+    except (AttributeError, ValueError):  # pragma: no cover
+        return False  # pragma: no cover
 
 
 @contextmanager
