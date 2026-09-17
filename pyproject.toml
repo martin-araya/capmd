@@ -110,4 +110,26 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --cov=capmd --cov-report=term-missing --cov-report=html:htmlcov --cov-fail-under=90"
+
+[tool.coverage.run]
+source = ["src/capmd"]
+branch = true
+omit = [
+  "src/capmd/assets/*",
+  "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+skip_empty = true
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "abstract method",
+  "\\.\\.\\.",
+]
+precision = 1
