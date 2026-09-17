@@ -49,6 +49,14 @@ dev = [
   "syrupy>=4.6,<5",
 ]
 
+docs = [
+  "sphinx>=7.0",
+  "myst-parser>=3.0",
+  "furo>=2024.1",
+  "sphinx-copybutton>=0.5",
+  "sphinxext-opengraph>=0.9",
+]
+
 [project.scripts]
 capmd = "capmd.cli:app"
 
