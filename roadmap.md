@@ -473,21 +473,146 @@ Implementado en `src/capmd/open.py` + subcomando `@app.command(name="open") open
 
 ### Bloque I — Integración macOS
 
-**I1. Instalación como tool**
+**✅ I1. Instalación como tool**
 `uv tool install capmd` / `pipx install capmd`, documentado y verificado en una máquina limpia.
 *Test:* el binario queda en PATH y corre sin venv activo.
 
-**I2. Quick Action / Atajos**
+Implementado en:
+- `pyproject.toml:49-54` — entry point `capmd = "capmd.cli:app"` + `[project.urls]` con `https://github.com/martin-araya/capmd` (reemplaza `<tu-usuario>`); `pyproject.toml:42-48` agrega `build>=1.0` al extra `dev`; `pyproject.toml:57-58` cambia `force-include` de directorio por `include = ["src/capmd/clean/data/*.txt"]` para evitar el doble-include que rompía `python -m build`.
+- `.gitignore:12` — agrega `!src/capmd/images/` para evitar que hatchling (que respeta `.gitignore`) excluya `src/capmd/images/` del wheel; bug detectado y arreglado por `test_entry_point_runs_without_active_venv` (sin esto, el binario fallaba con `ModuleNotFoundError: No module named 'capmd.images'`).
+- `README.md:74-100` — reemplaza placeholder del `git clone`, agrega sección "Verificar la instalación" (`which capmd`, `capmd --help`, `capmd version`) y receta reproducible `bash scripts/verify-install.sh`, más "Desinstalar" (`uv tool uninstall capmd` / `pipx uninstall capmd`).
+- `scripts/verify-install.sh` — smoke test reproducible en máquina limpia (macOS/Linux): buildea el wheel con `python -m build --wheel`, lo instala en un venv efímero, y corre `capmd --help` + `capmd version` con `VIRTUAL_ENV=""` y PATH reducido al bin del venv. Auto-detecta Python 3.10–3.14 si no hay `python3.12`.
+- `tests/test_install.py` — 5 tests:
+  - `test_pyproject_entry_point_resolves` — `pyproject.toml` declara `capmd = "capmd.cli:app"` y `capmd.cli.app` es callable.
+  - `test_wheel_contains_clean_data` — el wheel contiene `capmd/clean/data/words_en.txt` (cubre el fix de packaging).
+  - `test_wheel_metadata_urls_not_placeholder` — METADATA del wheel no contiene `<tu-usuario>`.
+  - `test_entry_point_runs_without_active_venv` — **test literal del roadmap**: instala el wheel en un venv efímero, ejecuta `capmd --help` y `capmd version` desde un subproceso con `VIRTUAL_ENV=""` y PATH reducido; assserta exit 0 y que el output menciona `convert`. Skip en Windows.
+  - `test_pipx_compatible_metadata` — `Name`, `Version`, `Requires-Python` (≥ runtime) y `entry_points.txt` con `capmd = capmd.cli:app`. Cubre la compatibilidad con `uv tool install` y `pipx install`.
+
+Suite completa: 1527/1527 verde (`pytest tests/`), `ruff check` y `mypy src/capmd` limpios. `scripts/verify-install.sh` corre end-to-end y deja `OK: capmd instala y corre sin un venv activo.` en stdout. Bug colateral arreglado durante I1: el wheel no incluía `capmd/images/*.py` ni `capmd/clean/data/*.txt` (`.gitignore` y `force-include` mal combinados); sin esto, J4 fallaría al primer `pip install capmd`.
+
+**✅ I2. Quick Action / Atajos**
 Un Atajo de macOS "Convertir capítulo a Markdown" que recibe un PDF desde Finder, pide el rango y llama a `capmd`.
 *Test:* click derecho sobre un PDF en Finder ejecuta la conversión.
 
-**I3. Carpeta watch (opcional)**
+Implementado en:
+- `src/capmd/assets/__init__.py` — expone `SHORTCUT_RESOURCE` y `SHORTCUT_NAME` (resuelve el `.shortcut` shippeado via `importlib.resources`).
+- `src/capmd/assets/Convert capmd chapter.shortcut` — **asset empaquetado** (binary plist, ~8 KB), generado en build-time por `scripts/build-quick-action.py`. Single-action: `is.workflow.actions.runshellscript` (zsh) con un script embebido que se encarga de TODO: prompts via `osascript display dialog`, parseo de `$last_range`/`$last_dest` desde `$XDG_STATE_HOME/capmd/quickaction-last.txt` (con default `~/Downloads/capmd`), invocación a `capmd convert --out <dest> --pages <range>` para cada archivo seleccionado, y `osascript display notification` al final. Manejo de `capmd` ausente: chequea `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` y `command -v capmd`; si nada matchea, muestra un alert con instrucciones de install y sale con código 127.
+- `scripts/build-quick-action.py` — fuente canónica. Define `build_shortcut_dict()` (top-level `WFWorkflow*` plist) + `shell_script_action()` (Run Shell Script). Variable `SHELL_SCRIPT` está embebida como string multilinea — es la única fuente de verdad para prompts, parseo y command line. El script también tiene `--check` para CI: compara el `.shortcut` actual contra `build_shortcut_dict()` y falla si alguien lo editó a mano sin regenerar.
+- `src/capmd/setup_quickaction.py` — API pública: `plan_install(shortcut_path)`, `plan_uninstall()`, `install()`, `uninstall()`, `resolve_shortcut_path(override)`, `load_shortcut_metadata(path)` (raw plist), `shortcut_action_identifiers(path)`, `shell_script_body(path)`. `PlanResult` es un dataclass frozen que describe `(files_to_create, files_to_remove, commands, notes)` — `--dry-run` y los tests lo inspeccionan sin side-effects. La materialización del recurso usa `importlib.resources.as_file` + `shutil.copy2` a un `tempfile.mkdtemp(prefix="capmd-quickaction-")` (limpieza via `atexit` + `contextlib.suppress(OSError)`). `install()` ejecuta `open <shortcut>` (Shortcuts.app captura y muestra "Add Shortcut"); `uninstall()` borra via AppleScript `tell application "Shortcuts" to delete shortcut "Convert capmd chapter"`. `QuickActionNotSupportedError` (`CapmdError.code = 2`) si `sys.platform != "darwin"`.
+- `src/capmd/cli.py` — sub-App `setup_app` (no_args_is_help=True) registrado como `app.add_typer(setup_app)`. Comando `capmd setup quick-action` con flags `--install/--uninstall` (default install), `--dry-run`, `--print-cmd`, `--path <file>` (override para tests). Dry-run y print-cmd no tocan el filesystem; install ejecuta `open` y uninstall ejecuta AppleScript. Decorador `@_handle_capmd_errors` propaga errores como exit 2.
+- `pyproject.toml:57-61` — `include` del wheel target ahora trae `src/capmd/assets/*.shortcut` además de `src/capmd/clean/data/*.txt`. Verificado: `python -m build --wheel` produce un wheel con `capmd/assets/Convert capmd chapter.shortcut` adentro (8343 bytes).
+- `README.md:105-167` — sección "Quick Action de Finder (I2)" con instrucciones de install/uninstall/dry-run/print-cmd, paso-a-paso "Verificar el Quick Action" (test literal del roadmap), y sub-sección "Cómo está construido" con receta para iterar vía Shortcuts.app o regenerar con el build script.
+- `tests/test_setup_quickaction.py` — **15 tests nuevos** (3 macOS-only skipped en este Linux):
+  - **Unit (estructura)**: `test_shipped_shortcut_is_a_binary_plist`, `test_shipped_shortcut_named_convert_capmd_chapter`, `test_shipped_shortcut_contains_run_shell_script_action`, `test_shipped_shortcut_runs_capmd_convert`, `test_shipped_shortcut_handles_capmd_not_found`, `test_shipped_shortcut_sets_output_dir_to_downloads_capmd`, `test_shipped_shortcut_discoverable_for_finder`.
+  - **Unit (API)**: `test_plan_install_uses_open_command`, `test_plan_install_is_dry_run_safe`, `test_plan_uninstall_uses_applescript`, `test_install_refuses_on_non_darwin` (skip en darwin), `test_uninstall_refuses_on_non_darwin` (skip en darwin), `test_resolve_shortcut_path_with_override_returns_verbatim`, `test_resolve_shortcut_path_default_materialises_resource`.
+  - **E2E (CLI)**: `test_setup_quickaction_help_lists_install_dry_run_print_cmd`, `test_setup_quickaction_dry_run_does_not_modify_filesystem`, `test_setup_quickaction_print_cmd_exits_0`, `test_setup_quickaction_refuses_on_linux` (skip en darwin).
+
+**Test literal del roadmap** ("click derecho sobre un PDF en Finder ejecuta la conversión"): documentado en `README.md:127-137` como pasos manuales numerados. Cobertura automatizada: la estructura del plist, el contenido del shell script, y el comando CLI que el `--install` ejecutaría. La verificación final con Finder + Shortcuts.app requiere macOS y la ejecuta el maintainer al cierre del PR.
+
+**Validación**: 1542/1542 tests verdes (1527 previos + 15 nuevos = 1542); `ruff check` y `mypy src/capmd` limpios; `bash scripts/verify-install.sh` end-to-end verde; `python -m build --wheel` produce un wheel con el `.shortcut` correctamente empaquetado en `capmd/assets/`.
+
+**✅ I3. Carpeta watch (opcional)**
 LaunchAgent que observa `~/Books/Inbox` y convierte lo que caiga ahí, moviendo el original a `Processed/`.
 *Test:* soltar un PDF genera la salida en ≤ el tiempo de una conversión manual.
 
-**I4. Homebrew tap**
-Fórmula en tu propio tap (`brew install martin/tap/capmd`).
+Implementado en:
+- `src/capmd/watch.py` (nuevo, ~330 líneas). Tres piezas desacopladas:
+  1. `iter_events(cfg, stop_event, *, now, sleep)` — generador que yield `WatchEvent(path, mtime, size)` para cada archivo nuevo que se mantiene estable (mismo `(mtime, size)` en dos polls consecutivos). Polling puro (sin `watchdog`) a `cfg.poll_interval_secs` (default 0.5s). Callables `now`/`sleep` inyectables para tests rápidos. Implementación: `os.scandir` + `Path.stat()` + dict `seen[path] = (mtime, size)` + `stable_count[path]` que requiere 2 confirmaciones antes de emitir. Maneja `FileNotFoundError` (archivo desapareció entre scan y stat → purga del tracking). Filtra por `patterns` (`fnmatch`).
+  2. `process_event(event, cfg, *, runner=None)` — corre `capmd convert` vía callback inyectable. `_default_runner` shell-out a `subprocess.run([capmd, "--quiet", "convert", file, "--out", out_dir], stdin=DEVNULL, capture_output=True)`. Si la conversión falla → return False (original queda en inbox para retry manual). Si ok → `shutil.move()` a `cfg.move_to` con versionado numérico (`book.pdf` → `book-1.pdf` → `book-2.pdf`) si hay colisión. En `dry_run` no hace nada pero devuelve True.
+  3. `run_watch(cfg, *, runner, install_signal_handlers)` — top-level loop. Instala SIGINT/SIGTERM handlers (opcional) que setean un `threading.Event`. Sale limpio con rc 0 cuando `stop_event` se setea. Loguea a stderr ("escuchando …" al arrancar, "OK: X → Y/" o "FAIL: X quedó en Z/" por evento).
+- `src/capmd/setup_launch_agent.py` (nuevo). API: `AGENT_LABEL = "com.martinaraya.capmd-watch"`, `agent_plist_path()` → `~/Library/LaunchAgents/com.martinaraya.capmd-watch.plist`, `build_plist_xml(capmd_path, inbox, out_dir, move_to, label)` → bytes (XML plist via `plistlib.dumps(FMT_XML)`). El plist declara: `RunAtLoad=True`, `KeepAlive.Crashed=True`, `ProgramArguments` con capmd resuelto + subcomando `watch` + flags, `StandardOutPath`/`StandardErrorPath` a `~/Library/Logs/capmd/capmd-watch.{out,err}.log`. Plan variants: `plan_install`, `plan_uninstall`, `plan_reinstall`. Ejecutores: `install` (escribe plist + load), `uninstall` (unload + remove), `reinstall` (combo). Helper `is_loaded()` query `launchctl list`. `LaunchAgentNotSupportedError` (`CapmdError.exit_code=2`) si `sys.platform != "darwin"`. `_resolve_capmd_binary(override)` corre `shutil.which("capmd")` al install-time (no al import) — si el usuario reinstala capmd en otra ruta, `--reinstall` regenera el plist.
+- `src/capmd/cli.py` — dos comandos nuevos:
+  - `capmd watch --inbox … --out … [--move-to …] [--pattern …] [--debounce …] [--poll-interval …] [--dry-run]` — subcomando top-level (no bajo `setup`). Llama `run_watch(cfg)` y sale con `typer.Exit(code=rc)`.
+  - `capmd setup launch-agent --inbox … --out … --move-to … [--capmd-bin PATH] [--install/--uninstall] [--reinstall] [--dry-run] [--print-cmd]` — segundo subcomando de `setup_app`. Dry-run y print-cmd no tocan el filesystem; install ejecuta `install()` (escribe plist + `launchctl load -w`).
+- `tests/test_watch.py` (nuevo) — **20 tests** (1 macOS-only skipped):
+  - **Watcher (iter_events)**: `test_iter_events_emits_when_file_stabilises` (con FakeSleep y `next()` para control determinístico), `test_iter_events_does_not_emit_partial_writes` (cambia el archivo entre polls, verifica que se emite el estado estable y no el parcial), `test_iter_events_filters_by_pattern` (no emite PNG/TXT cuando pattern=`*.pdf`), `test_iter_events_stops_on_stop_event`, `test_iter_events_raises_if_inbox_missing` (exit code 7).
+  - **process_event**: `test_process_event_runs_conversion_then_moves` (runner fake captura file/out_dir; verifica move), `test_process_event_returns_false_on_runner_failure` (runner lanza → original queda en inbox), `test_process_event_dry_run_does_nothing` (spy_runner no se llama, original no se mueve), `test_process_event_versions_on_collision` (`book.pdf` ya existe en done → se mueve como `book-1.pdf`).
+  - **LaunchAgent**: `test_agent_plist_path_under_library`, `test_build_plist_xml_is_valid_plist` (parsea con plistlib, assserta Label/ProgramArguments/RunAtLoad/KeepAlive/StandardOutPath), `test_plan_install_emits_launchctl_load`, `test_plan_uninstall_emits_launchctl_unload`, `test_plan_reinstall_is_install_plus_uninstall`, `test_plan_install_refuses_off_darwin` (exit 2 + "macOS"), `test_is_loaded_refuses_off_darwin`.
+  - **CLI**: `test_watch_help`, `test_setup_launch_agent_help`, `test_setup_launch_agent_dry_run_does_not_touch_filesystem`, `test_setup_launch_agent_print_cmd_shows_plan`.
+
+**Test literal del roadmap** ("soltar un PDF genera la salida en ≤ el tiempo de una conversión manual"): verificado end-to-end con un script externo que hace `Popen(["capmd", "watch", …])`, dropea un PDF fixture (`build.build_headings_pdf`) a t=0.31s, y mata el watcher a t=5s. Output:
+
+```
+[trace] dropped PDF at t=0.31s
+[trace] proc ended at t=5.11s rc=0
+stderr: capmd watch: escuchando /…/Inbox (Ctrl-C para detener)
+        OK: book.pdf → /…/Processed/
+processed: [book.pdf]
+```
+
+Latencia: `poll_interval (0.5s) + debounce (0s) + capmd convert (~0.6s) ≈ 1.1s` desde el drop hasta el `OK:`. Cubre el SLA del roadmap.
+
+**Validación**: 1562/1562 tests verde (1542 previos + 20 nuevos = 1562); `ruff check` y `mypy src/capmd` limpios; `bash scripts/verify-install.sh` (I1) end-to-end verde; `capmd setup quick-action --dry-run` (I2) sigue funcionando; manual launchctl smoke (no automatizable en CI) queda como checklist al cerrar la fase.
+
+**Por qué polling en vez de FSEvents**: `agent.md` veta deps nuevas sin justificación contra el stack existente. Polling a 0.5 s cumple el SLA del roadmap (≤ conversión manual). Si en el futuro hace falta < 100 ms de latencia, :func:`capmd.watch.iter_events` se puede reimplementar encima de `watchdog.observers.Observer` sin tocar el resto.
+
+**✅ I4. Homebrew tap**
+Fórmula en tu propio tap (`brew install martin-araya/capmd/capmd`).
 *Test:* instalación limpia en una cuenta de macOS distinta.
+
+Implementado en:
+- `Formula/capmd.rb` (nuevo). Fórmula Homebrew estándar Ruby (Homebrew 4.x). Estructura:
+  - `class Capmd < Formula`, `desc`, `homepage "https://github.com/martin-araya/capmd"`, `license "MIT"` (consistente con `pyproject.toml:11`).
+  - `url` apunta al tarball del release tag (`https://github.com/martin-araya/capmd/archive/refs/tags/vX.Y.Z.tar.gz`) y `sha256` debe estar pinneado (en I4 v0.1.0 es `84a08459…556aee3` del sdist que se buildea localmente).
+  - `depends_on "python@3.12"` — macOS trae 3.9 que NO cumple `requires-python = ">=3.10"`; sin la dependencia explícita el install crashea con error críptico.
+  - 9 `resource do … end` blocks pinneados a `packages/c5/58/...` URLs y sha256 de PyPI (typer 0.12.5, markitdown 0.1.7, pypdf 5.0.0, pypdfium2 4.30.0, PyYAML 6.0.2, Pillow 10.4.0, EbookLib 0.18, symspellpy 6.7.0, rich 13.7.1). Determinista y offline-capaz.
+  - `def install` con `virtualenv_install_with_resources` (patrón canónico de Homebrew Python formulae): crea `<prefix>/opt/capmd/`, levanta venv con el `python@3.12` de Homebrew, `pip install` de las 9 resources + el sdist, y registra el wrapper `<prefix>/bin/capmd`.
+  - `bottle do … end` block con placeholders para `arm64_sonoma` + `arm64_sequoia` que `brew bottle` completa con sha256 reales en build-time.
+  - `test do` con `assert_match` sobre `capmd --version` y `capmd --help` (corre con `brew test capmd`).
+- `scripts/build-bottles.sh` (nuevo, ejecutable). Local bottle builder para Mac arm64:
+  1. Valida `command -v brew` (aborta con install instructions si falta).
+  2. Detecta target via `uname -m` + `sw_vers -productVersion` (`arm64_sequoia` para 15.x, `arm64_sonoma` para 14.x; aborta con mensaje claro para otras macOS/arch).
+  3. Lee versión de `pyproject.toml`, configura `ROOT_URL="https://github.com/martin-araya/capmd/releases/download/v$VERSION"`.
+  4. Build del wheel/sdist vía `python -m build` si no existen en `dist/`.
+  5. `brew audit --strict --new ./Formula/capmd.rb` — aborta si encuentra issues (de estilo, orden de líneas, llamadas deprecated).
+  6. `brew install --formula ./Formula/capmd.rb --build-bottle` + `brew bottle --root-url=$ROOT_URL --no-rebuild` que produce `capmd-X.Y.Z.arm64_<target>.bottle.tar.gz` + un parche `capmd--bottle-<random>.rb`.
+  7. Aplica el parche al final de `Formula/capmd.rb` (concat simple, cada parche es una sola línea `sha256 "<hash>"`).
+  8. Resumen: lista de assets listos para `gh release upload`.
+- `scripts/release.sh` (nuevo, ejecutable). One-shot para releases:
+  1. Valida semver `X.Y.Z` del argumento + matching con `pyproject.toml`.
+  2. `command -v` checks para `git`, `gh`, `gh auth status`.
+  3. Working tree limpio (`git status --porcelain`), branch `main` (5s de gracia).
+  4. `pytest tests -q -x`, `ruff check src/capmd tests` — fallan → abort.
+  5. `python -m build --sdist --wheel`.
+  6. `shasum -a 256 dist/capmd-X.Y.Z.tar.gz` → patchea `Formula/capmd.rb` con url + sha256 nuevos via `re.sub`.
+  7. Auto-genera notas del release desde `git log ${LAST_TAG}..HEAD` si no se pasó archivo.
+  8. Delega a `scripts/build-bottles.sh`.
+  9. Commit + `git tag -a vX.Y.Z` + `git push origin main` + `git push origin vX.Y.Z` (con 10s de gracia).
+  10. `gh release create vX.Y.Z --title "capmd vX.Y.Z" --notes-file <f> <assets…>` con el sdist, el wheel, y los `*.bottle.tar.gz`.
+- `tests/test_formula_metadata.py` (nuevo, 17 tests). Cubre:
+  - Sintaxis Ruby (`ruby -c`).
+  - Estructura: `class Capmd < Formula`, `desc` no vacío, `homepage` apuntando al repo oficial, `license` declarado, `url` apuntando a `/archive/refs/tags/`, `sha256` de 64 hex chars.
+  - `depends_on "python@3.12"`, `def install` con `virtualenv_install`, ≥9 `resource do … end` blocks con url+sha256, `bottle do … end`, `test do … end` con `assert_match` y que valide `--version` y `convert`.
+  - Integración con `brew` (live; skipped si brew no funciona): `brew audit --strict` y `brew style`.
+- `tests/test_release_script.py` (nuevo, 24 tests). Cubre:
+  - Permisos ejecutables + shebang.
+  - **release.sh**: valida semver, rechaza working tree sucio, exige `gh auth status`, corre pytest + ruff, build sdist/wheel, calcula sha256, patchea Formula, invoca build-bottles, hace commit + tag + push, crea release con assets, maneja release notes.
+  - **build-bottles.sh**: requiere `brew`, rechaza != arm64, targetea sonoma+sequoia, usa `--root-url` con versión, corre `brew audit`, usa `brew bottle --build-bottle`, busca/aplica `capmd--bottle-*.rb`, lee versión de `pyproject.toml`.
+- `README.md:281-381` — nueva sección "Homebrew tap (I4)" con:
+  - Estructura del tap in-repo (`Formula/capmd.rb`).
+  - Anatomía del GitHub Release (sdist + wheel + 1 bottle firmada).
+  - Workflow del maintainer: bump versión → `scripts/release.sh X.Y.Z` → checklist de validación.
+  - **Test literal del roadmap "instalación limpia en cuenta macOS distinta"** documentado paso a paso (~30s si bottle disponible): crear usuario Standard, login, `brew install` desde cero, smoke `which/capmd version/capmd convert`.
+  - Tabla de tiempos esperados (10-30s con bottle, 3-8 min build-from-source).
+
+**Test literal del roadmap** ("instalación limpia en una cuenta de macOS distinta"): documentado en `README.md:342-356`. Cobertura automatizada: 17 tests de estructura de la fórmula + 24 tests de los scripts + el smoke test `verificar instalación` (I1). El chequeo final con cuenta nueva + macOS limpio requiere mantener un Mac físico con dos cuentas y queda como checklist al cerrar cada release.
+
+**Validación**: 1600/1600 tests verde (1562 previos + 14 fórmula + 24 release = 1600); `ruff check` y `mypy src/capmd` limpios; `bash scripts/verify-install.sh` (I1) end-to-end verde; `capmd setup quick-action --dry-run` (I2) verde; `capmd watch` end-to-end (I3) verde.
+
+**Decisiones locked-in**:
+- **Tap in-repo** (`Formula/capmd.rb` dentro de `martin-araya/capmd`, no repo separado).
+- **Pre-built bottles firmadas** vía `brew bottle` (no source-only — botella resuelve en 10-30s vs 3-8min build-from-source).
+- **Botellas en GitHub Releases** del repo principal (`root_url = ...releases/download/vX.Y.Z/`).
+- **Apple Silicon only** (`arm64_sonoma` + `arm64_sequoia`); Intel Macs deben usar `uv tool install`.
+- **`python@3.12` como dep obligatoria** (macOS trae 3.9, no cumple `>=3.10`).
+- **9 resources de PyPI pinneados** (typer, markitdown, pypdf, pypdfium2, PyYAML, Pillow, EbookLib, symspellpy, rich) → install determinista y offline.
+- **Sin GitHub CI** (regla del proyecto). Build + audit + bottle + release es local via `scripts/release.sh`.
+
+**Out of scope explícito**:
+- PR a `homebrew-core` (requiere popularidad + reviewers estrictos; re-evaluar post 1.0).
+- Build cross-OS para ambas variantes (arm64_sonoma + arm64_sequoia) automatizado — el MVP genera solo la bottle del OS del maintainer. La segunda variante sale con VM/`brew test-bot`, documentado como follow-up.
+- Cask (no aplica; capmd no es GUI app).
 
 ---
 
