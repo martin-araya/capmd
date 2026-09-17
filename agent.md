@@ -115,6 +115,20 @@ UV_PUBLISH_TOKEN=$PYPI_TOKEN bash scripts/verify-pypi-install.sh 0.2.0
 - **Trusted publishing (OIDC)** NO se usa: requiere CI runner; el proyecto veta GH Actions.
 - **No re-upload**: PyPI no permite re-upload de la misma version. Yanking solo via UI web.
 
+## Documentación (J5)
+
+- **README.md** (PyPI long-description) cubre Quickstart + Instalación + Uso + Configuración. El primer bloque de cada user.
+- **`docs/`** es el Sphinx site con detalles por módulo, cleaners, troubleshooting. Build via `make docs` (output en `docs/_build/html/`). Theme: Furo.
+- **`docs/cleaners.md`** (~800 LoC, J5 emphasis) tiene tabla resumen arriba + 1 sección por cleaner con qué reescribe, qué NO toca, y cómo deshabilitarlo. El docstring de cada cleaner en `src/capmd/clean/` linkea aca.
+- **`tests/test_docs.py`** parsea bloques `\`\`\`bash` del README y los ejecuta contra `capmd` instalado. Implementa el test contracto del roadmap J5: "alguien que nunca vio el proyecto convierte un capítulo siguiendo solo el README".
+- **`make test-docs`** corre `tests/test_docs.py`. `make docs` rebuild el sitio Sphinx.
+
+## Convenciones de docstrings (J5)
+
+- **Cleaners**: el module docstring debe explicar (1) qué reescribe, (2) qué NO toca (false-positive guards), (3) link a [docs/cleaners.md](docs/cleaners.md). Sphinx + autodoc + napoleon extraen estos para el sitio.
+- **Otros módulos**: Google o NumPy style (Args/Returns/Raises) para que napoleon los renderice.
+- **No docstrings inline en el cuerpo de las funciones cortas**: preferí un buen nombre y un type hint.
+
 ## Qué no hacer
 - No agregar dependencias nuevas sin justificarlo contra las que ya están.
 - No vendorizar markitdown ni parchearlo en runtime; si algo le falta, se resuelve en `clean/` o en un plugin propio (fase K1).

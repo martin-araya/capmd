@@ -2,6 +2,24 @@
 
 Convierte el capítulo de un libro a Markdown limpio, listo para leer, resumir y estudiar.
 
+## Quickstart
+
+```bash
+# 1. Instalar (Homebrew tap, recomendado en macOS)
+brew install martin-araya/capmd/capmd
+# o: uv tool install capmd
+# o: pip install capmd
+
+# 2. Ver el índice del libro
+capmd toc path/to/book.pdf
+
+# 3. Convertir un capítulo
+capmd convert path/to/book.pdf --chapter "Ownership" --out ~/Estudio
+
+# 4. Leer el output
+cat ~/Estudio/book/cap-NN-ownership/cap-NN-ownership.md
+```
+
 `capmd` es un wrapper de [MarkItDown](https://github.com/microsoft/markitdown) que resuelve lo que MarkItDown deliberadamente no hace: recortar un capítulo de un libro completo, limpiar la basura del PDF (headers repetidos, guiones de corte, números de página sueltos), reconstruir la jerarquía de títulos y sacar las figuras a una carpeta con las referencias en su posición real.
 
 ```bash
@@ -16,6 +34,8 @@ capmd convert rust-handbook.pdf --chapter "Ownership" --out ~/Estudio
 │   └── fig-04-02.png
 └── capmd.json
 ```
+
+Para profundizar: [docs/](docs/index.md) tiene instalación detallada, tour de uso, referencia de flags, configuración TOML, lista de cleaners, troubleshooting, y la API reference autogenerada.
 
 ---
 
@@ -570,6 +590,10 @@ clean_skip = ["tables"]
 Precedencia: flags de CLI > variables `CAPMD_*` > `./capmd.toml` > config global > defaults.
 
 `capmd config show` imprime la configuración efectiva ya resuelta.
+
+### ¿Qué hace cada cleaner?
+
+Para entender qué reescribe y qué **deliberadamente NO toca** cada cleaner, y cómo deshabilitar uno para un libro puntual, ver [docs/cleaners.md](docs/cleaners.md).
 
 ---
 
