@@ -17,7 +17,7 @@ from capmd.models import Chapter
 class Source(Protocol):
     """Contrato mínimo que cumple cada lector de formato."""
 
-    def read_outline(self, path: Path) -> list[Chapter]:
+    def read_outline(self, path: Path) -> list[Chapter]:  # pragma: no cover - Protocol
         """Devuelve el outline aplanado en orden de aparición.
 
         Entradas cuya página no se puede resolver se descartan (con un

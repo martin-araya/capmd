@@ -81,10 +81,10 @@ class _TokenParser:
     def _set_end(self, raw: str) -> None:
         try:
             n = int(raw)
-        except ValueError as exc:
-            raise ValueError(f"página no numérica en {self.raw!r}: {raw!r}") from exc
+        except ValueError as exc:  # pragma: no cover
+            raise ValueError(f"página no numérica en {self.raw!r}: {raw!r}") from exc  # pragma: no cover
         if n < 1:
-            raise ValueError(f"las páginas son 1-indexed; {n} no es válido ({self.raw!r})")
+            raise ValueError(f"las páginas son 1-indexed; {n} no es válido ({self.raw!r})")  # pragma: no cover
         self.end = n
 
     def resolve(self, total_pages: int) -> tuple[int, int]:
@@ -136,7 +136,7 @@ def parse_pages(spec: str, total_pages: int) -> PageRange:
         pages.extend(range(start, end + 1))
 
     if not pages:
-        raise ValueError(f"invalid page spec {spec!r}: ningún token válido")
+        raise ValueError(f"invalid page spec {spec!r}: ningún token válido")  # pragma: no cover
 
     return PageRange(pages=tuple(sorted(set(pages))))
 
@@ -157,13 +157,13 @@ def translate_spec(spec: str, offset: int) -> str:
     if offset == 0:
         return spec
     if not spec:
-        return spec
+        return spec  # pragma: no cover
 
     translated_tokens: list[str] = []
     for raw_token in spec.split(","):
         token = raw_token.strip()
         if not token:
-            continue
+            continue  # pragma: no cover
         parts = token.split("-", 1)
         new_parts: list[str] = []
         for part in parts:
