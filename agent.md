@@ -54,11 +54,14 @@ src/capmd/
 ## Tests
 
 ```bash
-pytest                       # todo
+pytest                       # todo (corre coverage con --cov-fail-under=90)
 pytest tests/clean           # un bloque
 pytest --update-golden       # regenerar expectativas de los cleaners
-ruff check . && mypy src/capmd/core
+pytest --cov=capmd.X --cov-fail-under=100 tests/test_X.py   # 100% en un módulo
+ruff check . && mypy src/capmd
 ```
+
+Coverage está wired en `pyproject.toml` (`[tool.coverage.run/report]`). `--cov-fail-under=90` falla el build si baja del umbral. Las excepciones defensivas inalcanzables se marcan con `# pragma: no cover` en el código. Los tests de J1 viven en `tests/test_j1_coverage_gaps.py` + `tests/test_j1_coverage_inspect.py`.
 
 Los golden files viven en `tests/golden/`. Si un cambio altera un golden, **revisar el diff a mano** antes de regenerarlo: el diff es la evidencia de si el cleaner mejoró o rompió algo.
 

@@ -656,11 +656,25 @@ El recorte por capítulo funciona en **PDF** (outline o heurística) y **EPUB** 
 
 ```bash
 uv pip install -e '.[dev]'
-pytest                      # suite completa
+pytest                      # suite completa (corre coverage + tests)
 pytest --update-golden      # regenerar los golden files de los cleaners
 ruff check . && ruff format .
-mypy src/capmd/core
+mypy src/capmd
 ```
+
+### Calidad de tests (J1)
+
+`pytest` corre **coverage** automáticamente y **falla el build si baja del 90%** (configurado vía `--cov-fail-under=90` en `pyproject.toml`). El reporte HTML queda en `htmlcov/index.html`.
+
+```bash
+pytest                                # verde con ≥ 90% coverage
+open htmlcov/index.html               # inspeccionar branches no cubiertos
+pytest --no-cov                       # solo tests, sin coverage (más rápido)
+pytest tests/test_clean_headers.py    # un módulo específico
+pytest --cov=capmd.clean --cov-fail-under=100 tests/test_clean_headers.py   # 100% en un archivo
+```
+
+Las excepciones defensivas (ej: `except Exception: pass` dentro de pools de pypdfium2 o file-locks de fcntl) se marcan con `# pragma: no cover` quirúrgicamente. El módulo está completo en `tests/test_j1_coverage_gaps.py`, `tests/test_j1_coverage_inspect.py`, `tests/test_clean_noop.py` y `tests/test_convert_limits.py`.
 
 Los fixtures de test se **generan** con `reportlab` (PDFs sintéticos con headers repetidos, guiones de corte, figuras, tablas, TOC). El repo no incluye material con copyright.
 
