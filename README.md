@@ -683,6 +683,41 @@ pytest --update-golden tests/test_golden_pipeline.py     # alias de --snapshot-u
 ```
 
 Los `.md` son archivos versionados — **revisar el diff a mano** antes de regenerarlos: el diff es la evidencia de si el cleaner mejoró o rompió algo. El mecanismo usa [syrupy 4.x](https://github.com/syrupy-project/syrupy) con un `MarkdownSnapshotExtension` custom (`tests/conftest.py`) que apunta los snapshots a `tests/golden/` en lugar del `__snapshots__/` default.
+
+### Versionado y changelog (J3)
+
+Workflow completo del maintainer para publicar una release:
+
+```bash
+# 1. Setup único: hooks versionados + cliff en PATH
+brew install git-cliff                      # o cargo install git-cliff
+bash scripts/install-hooks.sh               # git config core.hooksPath scripts/hooks
+
+# 2. Tras mergear a main y verificar que los tests verdes:
+bash scripts/bump-version.sh                # sugiere v0.2.0 y parchea pyproject.toml
+# (revisá el diff)
+
+git add pyproject.toml
+git commit -m "chore(release): bump 0.1.0 → 0.2.0"
+
+# 3. Tag + push. El hook post-tag dispara el release pipeline.
+git tag -a v0.2.0 -m "release: v0.2.0"
+#    ↳ hook ejecuta scripts/release.sh: build sdist + wheel + bottles
+#      + formula patch + push + gh release create v0.2.0 con assets
+```
+
+Mecánica:
+- **SemVer**: `pyproject.toml:7` declara `version = "0.1.0"`; `scripts/release.sh:69` valida coincidencia con el tag.
+- **`git-cliff --bump`**: computa la próxima versión desde commits convencionales (`feat:`→minor, `BREAKING CHANGE:`→major, `fix:`→patch).
+- **`cliff.toml`**: parser de conventional commits (case-insensitive) que agrupa `feat/fix/perf/refactor/docs/test/build/ci/style/chore/revert` y etiqueta `[**breaking**]` para `feat!`/`fix!`/`BREAKING CHANGE:`.
+- **`scripts/hooks/post-tag`**: solo dispara en annotated tags `vX.Y.Z`; invoca `scripts/release.sh`. Tags lightweight o non-semver se ignoran.
+- **`scripts/release.sh`** ya no tag-ea internamente — el tag es el trigger del hook. Si se invoca manualmente (`bash scripts/release.sh X.Y.Z`), skip-ea si el tag existe o lo crea si falta.
+
+Pre-requisitos del maintainer (documentados en el README y en `agent.md`):
+- `git-cliff` en PATH (`brew install git-cliff`).
+- `gh` autenticado (`brew install gh && gh auth login`).
+- `brew` con tap `martin-araya/capmd` configurado (I1, I4).
+- Working tree limpio al momento de tagear.
 ```
 
 Las excepciones defensivas (ej: `except Exception: pass` dentro de pools de pypdfium2 o file-locks de fcntl) se marcan con `# pragma: no cover` quirúrgicamente. El módulo está completo en `tests/test_j1_coverage_gaps.py`, `tests/test_j1_coverage_inspect.py`, `tests/test_clean_noop.py` y `tests/test_convert_limits.py`.

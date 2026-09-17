@@ -77,10 +77,25 @@ queda sin documentar en `--help`.
 
 ## Convenciones
 
-- Commits convencionales: `feat(clean): dehyphenation heuristic`, `fix(pdf): offset off-by-one`.
+- **Commits convencionales** (sin enforcement; documentados): `feat(clean): dehyphenation heuristic`, `fix(pdf): offset off-by-one`, `chore(release): bump 0.1.0 -> 0.2.0`. Tipos validos: `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`. Scope opcional. `BREAKING CHANGE:` en body o `!` despues del tipo -> major bump.
 - Una fase del roadmap = una rama = un PR (o un commit si vas directo a main).
 - Al cerrar una fase, marcarla en `roadmap.md`.
-- Docstrings en los limpiadores explicando **qué patrón detectan y qué caso deliberadamente no tocan** (el falso positivo importa más que el positivo).
+
+## Versionado y changelog (J3)
+
+```bash
+brew install git-cliff           # o cargo install git-cliff
+bash scripts/install-hooks.sh    # git config core.hooksPath scripts/hooks
+bash scripts/bump-version.sh     # sugiere proxima version y parchea pyproject.toml
+git tag -a v0.2.0 -m "..."       # el hook dispara scripts/release.sh
+```
+
+- **`cliff.toml`**: parser de conventional commits. Tipos: `feat/fix/perf/refactor/docs/test/build/ci/style/chore/revert`. `BREAKING CHANGE:` en body o `!` despues del tipo -> bump major.
+- **`scripts/hooks/post-tag`**: solo se dispara en annotated tags `vX.Y.Z`; tags lightweight y non-semver se ignoran. Invoca `scripts/release.sh` con el version extraido del ref.
+- **`scripts/release.sh`**: ya NO tag-ea internamente (el tag es el trigger). En modo manual (`bash scripts/release.sh X.Y.Z`), skip-ea si el tag existe o lo crea si falta. Siempre: pytest + ruff + build sdist+wheel + sha256 + Formula/capmd.rb patch + build-bottles.sh + gh release create.
+- **`scripts/bump-version.sh`**: wrapper sobre `git-cliff --bump` + sed a `pyproject.toml`. El maintainer revisa el diff antes de commit.
+- **`CHANGELOG.md`**: bootstrap manual (Keep-a-Changelog format). git-cliff lo regenera en cada release desde `git log` + conventional commits.
+- Pre-requisito: `brew install git-cliff` y `gh auth login`. Sin esto el hook falla o aborta.
 
 ## Qué no hacer
 - No agregar dependencias nuevas sin justificarlo contra las que ya están.
