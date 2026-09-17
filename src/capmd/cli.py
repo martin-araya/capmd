@@ -3358,3 +3358,279 @@ def _maybe_open_after(
             f"--open: editor no encontrado ({exc.filename or exc.strerror}). "
             "Verificá $EDITOR o --open-cmd."
         ) from None
+
+
+setup_app = typer.Typer(
+    name="setup",
+    help="(I2+) Instaladores y asistentes del entorno.",
+    no_args_is_help=True,
+)
+
+
+@setup_app.command(name="quick-action")
+@_handle_capmd_errors
+def setup_quickaction(
+    ctx: typer.Context,
+    install: bool = typer.Option(
+        True,
+        "--install/--uninstall",
+        help=(
+            "(I2) Instala (default) o desinstala el Quick Action de Finder "
+            "para invocar `capmd convert` desde el menú right-click."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Solo mostrar qué se haría, sin invocar `open` ni AppleScript.",
+    ),
+    print_cmd: bool = typer.Option(
+        False,
+        "--print-cmd",
+        help="Imprime el comando exacto (`open <.shortcut>` o AppleScript) y sale.",
+    ),
+    path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--path",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Override de la ruta del .shortcut (para tests / development).",
+    ),
+) -> None:
+    """Instala o desinstala el Quick Action de Finder (I2)."""
+    from capmd.setup_quickaction import (
+        plan_install,
+        plan_uninstall,
+        uninstall,
+    )
+
+    plan = plan_install(shortcut_path=path) if install else plan_uninstall(shortcut_path=path)
+
+    if print_cmd:
+        for line in plan.summary_lines():
+            typer.echo(line)
+        raise typer.Exit(code=0)
+
+    if dry_run:
+        typer.echo("# Plan (dry-run, no se ejecuta):")
+        for line in plan.summary_lines():
+            typer.echo(line)
+        raise typer.Exit(code=0)
+
+    if install:
+        from capmd.setup_quickaction import install as _install
+
+        _install(shortcut_path=path)
+        typer.echo(
+            'OK: Shortcuts.app mostrará la hoja "Add Shortcut"; '
+            "hacé click en Add para finalizar la instalación.",
+            err=False,
+        )
+    else:
+        uninstall()
+        typer.echo(
+            'OK: shortcut "Convert capmd chapter" eliminado de tu Shortcuts library.',
+            err=False,
+        )
+
+
+app.add_typer(setup_app)
+
+
+@app.command()
+@_handle_capmd_errors
+def watch(
+    ctx: typer.Context,
+    inbox: Path = typer.Option(  # noqa: B008
+        ...,
+        "--inbox",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="(I3) Carpeta a observar (default: ~/Books/Inbox).",
+    ),
+    out_dir: Path = typer.Option(  # noqa: B008
+        ...,
+        "--out",
+        file_okay=False,
+        dir_okay=True,
+        help="(I3) Carpeta donde ``capmd convert`` deja el markdown.",
+    ),
+    move_to: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--move-to",
+        file_okay=False,
+        dir_okay=True,
+        help=(
+            "(I3) Carpeta de archivos ya procesados (default: "
+            "``<inbox>/Processed``)."
+        ),
+    ),
+    pattern: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--pattern",
+        help="(I3) Glob(s) aceptados. Default: *.pdf, *.epub, *.docx, *.doc.",
+    ),
+    debounce: float = typer.Option(
+        2.0,
+        "--debounce",
+        min=0.0,
+        max=60.0,
+        help="(I3) Segundos a esperar para considerar 'estable' un archivo.",
+    ),
+    poll_interval: float = typer.Option(
+        0.5,
+        "--poll-interval",
+        min=0.05,
+        max=10.0,
+        help="(I3) Segundos entre polls. Default 0.5 (cumple el SLA del roadmap).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="(I3) Listar archivos que dispararían conversión, sin mover nada.",
+    ),
+) -> None:
+    """Observa ``--inbox`` y convierte lo nuevo (I3)."""
+    from capmd.watch import DEFAULT_PATTERNS as _DEFAULT_PATTERNS
+    from capmd.watch import WatchConfig, run_watch
+
+    effective_patterns = tuple(pattern) if pattern else _DEFAULT_PATTERNS
+    effective_move_to = move_to or (inbox / "Processed")
+    cfg = WatchConfig(
+        inbox=inbox,
+        out_dir=out_dir,
+        move_to=effective_move_to,
+        patterns=effective_patterns,
+        debounce_secs=debounce,
+        poll_interval_secs=poll_interval,
+        dry_run=dry_run,
+    )
+    raise typer.Exit(code=run_watch(cfg))
+
+    effective_move_to = move_to or (inbox / "Processed")
+    cfg = WatchConfig(
+        inbox=inbox,
+        out_dir=out_dir,
+        move_to=effective_move_to,
+        patterns=tuple(pattern),
+        debounce_secs=debounce,
+        poll_interval_secs=poll_interval,
+        dry_run=dry_run,
+    )
+    raise typer.Exit(code=run_watch(cfg))
+
+
+@setup_app.command(name="launch-agent")
+@_handle_capmd_errors
+def setup_launch_agent(
+    ctx: typer.Context,
+    inbox: Path = typer.Option(  # noqa: B008
+        ...,
+        "--inbox",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="(I3) Carpeta que el agente va a observar.",
+    ),
+    out_dir: Path = typer.Option(  # noqa: B008
+        ...,
+        "--out",
+        file_okay=False,
+        dir_okay=True,
+        help="(I3) Carpeta destino para los markdown generados.",
+    ),
+    move_to: Path = typer.Option(  # noqa: B008
+        ...,
+        "--move-to",
+        file_okay=False,
+        dir_okay=True,
+        help="(I3) Carpeta a la que se mueven los originales ya procesados.",
+    ),
+    capmd_bin: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--capmd-bin",
+        exists=True,
+        dir_okay=False,
+        help="Override de la ruta al binario de capmd (default: shutil.which).",
+    ),
+    install: bool = typer.Option(
+        True,
+        "--install/--uninstall",
+        help="(I3) Instala (default) o desinstala el LaunchAgent.",
+    ),
+    reinstall: bool = typer.Option(
+        False,
+        "--reinstall",
+        help="(I3) Uninstall + install con el binario de capmd actual.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="(I3) Solo mostrar el plan, sin escribir ni correr launchctl.",
+    ),
+    print_cmd: bool = typer.Option(
+        False,
+        "--print-cmd",
+        help="(I3) Imprime el plan y sale.",
+    ),
+) -> None:
+    """Instala o desinstala el LaunchAgent ``capmd watch`` (I3)."""
+    from capmd.setup_launch_agent import (
+        AGENT_LABEL,
+        plan_install,
+        plan_reinstall,
+        plan_uninstall,
+    )
+    from capmd.setup_launch_agent import (
+        install as _install,
+    )
+    from capmd.setup_launch_agent import (
+        reinstall as _reinstall,
+    )
+    from capmd.setup_launch_agent import (
+        uninstall as _uninstall,
+    )
+
+    if reinstall:
+        plan = plan_reinstall(
+            inbox=inbox, out_dir=out_dir, move_to=move_to, capmd_bin=capmd_bin
+        )
+    elif install:
+        plan = plan_install(
+            inbox=inbox, out_dir=out_dir, move_to=move_to, capmd_bin=capmd_bin
+        )
+    else:
+        plan = plan_uninstall()
+
+    if print_cmd:
+        for line in plan.summary_lines():
+            typer.echo(line)
+        raise typer.Exit(code=0)
+
+    if dry_run:
+        typer.echo("# Plan (dry-run, no se ejecuta):")
+        for line in plan.summary_lines():
+            typer.echo(line)
+        raise typer.Exit(code=0)
+
+    if reinstall:
+        _reinstall(inbox=inbox, out_dir=out_dir, move_to=move_to, capmd_bin=capmd_bin)
+        typer.echo(
+            f"OK: LaunchAgent '{AGENT_LABEL}' reinstalado.",
+            err=False,
+        )
+    elif install:
+        _install(inbox=inbox, out_dir=out_dir, move_to=move_to, capmd_bin=capmd_bin)
+        typer.echo(
+            f"OK: LaunchAgent '{AGENT_LABEL}' instalado y cargado.",
+            err=False,
+        )
+    else:
+        _uninstall()
+        typer.echo(
+            f"OK: LaunchAgent '{AGENT_LABEL}' descargado y removido.",
+            err=False,
+        )
