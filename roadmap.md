@@ -740,9 +740,50 @@ Out of scope explicito (no se hace en J4):
 - **Yanking / re-upload**: solo via UI web de PyPI; no se automatiza.
 - **Version pinning de `markitdown`**: queda como `>=0.1.7` (lower bound only). La decision de cap superior (`<0.2`) es scope future.
 
-**J5. README y docs**
-El README de este mismo paquete, más `docs/cleaners.md` explicando qué hace cada limpiador y cómo desactivarlo.
-*Test:* alguien que nunca vio el proyecto convierte un capítulo siguiendo solo el README.
+**✅ J5. README y docs**
+README expandido con Quickstart arriba de "Por qué existe" (4 comandos copy-paste que cubren el primer uso end-to-end) + link a `docs/cleaners.md` desde la sección Configuración. El sitio Sphinx en `docs/` cubre instalación detallada, tour de uso, referencia de flags, TOML config, output/capmd.json, quality warnings, shell completion, editor, formatos y limitaciones, development setup, y API reference autogenerado. **`docs/cleaners.md`** (~800 LoC, J5 emphasis) tiene tabla resumen arriba con los 11 cleaners públicos + 1 sección por cleaner con qué reescribe (input/output real), qué NO toca (false-positive guards), link al test, cómo deshabilitar via `clean_skip`/`enabled`. Sphinx + MyST + Furo theme + autodoc + napoleon.
+*Test:* alguien que nunca vio el proyecto convierte un capítulo siguiendo solo el README. ✅ 7 tests nuevos en `tests/test_docs.py` parsean bloques bash del README y los ejecutan contra `capmd` instalado (`capmd version`, `capmd --help`, `capmd config init`, `capmd toc <fixture>`). Sphinx build verde (1 warning no-bloqueante). Coverage sigue en 99.4%.
+
+Implementado en:
+- `pyproject.toml` — grupo `docs = [sphinx>=7.0, myst-parser>=3.0, furo>=2024.1, sphinx-copybutton>=0.5, sphinxext-opengraph>=0.9]`. Mantenido separado de `dev` (el maintainer que solo corre tests no necesita sphinx).
+- `docs/conf.py` (nuevo) — Sphinx config: extensions (myst_parser, autodoc, napoleon, viewcode, intersphinx, todo, copybutton, opengraph), html_theme=furo, autodoc_typehints="description", autodoc_class_signature="separated", intersphinx mapping a python/typer/rich/pypdf/pypdfium2, OpenGraph site_url + image. Lee version dinámicamente de pyproject.toml.
+- `docs/index.md` (nuevo, ~120 LoC) — landing con Quickstart, instalación, Quick Action de Finder, Uso, Configuración, tabla de links a los demás docs, link a API reference (autogen via sphinx-apidoc).
+- `docs/Makefile` + `docs/make.bat` (nuevos, Sphinx standard) — `make html`/`make clean`/`make serve`.
+- `docs/installation.md` (nuevo, ~80 LoC) — Homebrew tap, uv tool, pip, Quick Action, LaunchAgent watcher, brew tap maintenance, dev setup.
+- `docs/usage.md` (nuevo, ~120 LoC) — `capmd toc`, `capmd convert` (3 formas: nombre/número/páginas), `capmd batch`, `capmd inspect`, `capmd open`, `capmd watch`, `capmd config`, troubleshooting FAQ.
+- `docs/options.md` (nuevo, ~150 LoC) — referencia completa de flags de cada comando + exit codes.
+- `docs/configuration.md` (nuevo, ~110 LoC) — TOML schema, env vars, per-book detection, per-profile (`study` vs `light`), per-project override.
+- `docs/cleaners.md` (nuevo, **~800 LoC, J5 emphasis**) — tabla resumen de los 11 cleaners (D1-D12) + 1 sección por cleaner (~70 LoC c/u) con: objetivo, input/output real, qué reescribe (regex/heuristic), qué NO toca (false-positive guards), razón de diseño, link al test (`tests/test_clean_<nombre>.py`), cómo deshabilitar.
+- `docs/output.md` (nuevo, ~110 LoC) — estructura tree vs flat, schema de capmd.json, front matter YAML, split por H2, inject TOC, determinismo.
+- `docs/quality.md` (nuevo, ~80 LoC) — tabla de warnings con severidad, exit codes, `--strict`, schema versioning de capmd.json, troubleshooting (over_cleanup, sin outline).
+- `docs/shell-completion.md` (nuevo, ~40 LoC) — zsh, bash, fish, pwsh; `capmd --install-completion` vs `--show-completion`; integración con CI tests.
+- `docs/editor.md` (nuevo, ~40 LoC) — `capmd open PATH`, `--open` durante convert, editor default resolution, edge cases.
+- `docs/formats.md` (nuevo, ~80 LoC) — tabla de formatos markitdown (PDF/EPUB/DOCX/PPTX/XLSX/HTML/CSV/imagenes/audio/YouTube/ZIP), tabla de recorte por capítulo, limitaciones (PDF escaneados/EPUB DRM/imagenes/tablas/code blocks/lenguajes/charset).
+- `docs/development.md` (nuevo, ~110 LoC) — setup, tests layout (clean/, fixtures/, golden/, J1-J5), conventions, docstrings (J5), versionado (J3), PyPI (J4), docs (J5), release checklist, license.
+- `docs/modules/capmd.{clean,convert,sources,images,output,cli,config,models}.md` (nuevos, ~5 LoC c/u, con `automodule` directive) — referencias autodoc para los 8 modulos publicos clave. Se regeneran via `sphinx-apidoc -o docs/modules/ src/capmd/ --separate --no-toc` (documentado en `docs/index.md`).
+- `README.md` (modificado) — nueva sección `## Quickstart` arriba de "Por qué existe" con 4 comandos copy-paste (install + toc + convert + cat). Link a `docs/cleaners.md` desde Configuración.
+- `tests/test_docs.py` (nuevo, ~165 LoC, 7 tests) — implementa el test contracto del roadmap. Helper `_extract_bash_blocks(README)` con regex sobre `\`\`\`bash\n...\n\`\`\``. `_is_executable(block)` filtra setup/instalación (brew/uv/pip/git/gh/pytest/ruff/mypy). Fixture `capmd_executable` localiza el binario (PATH o `.venv/bin/capmd`). Tests: `test_readme_has_bash_blocks` (>=5 bloques), `test_readme_has_executable_blocks` (>=1 con `capmd`), `test_executable_blocks_have_capmd` (sanity check), `test_quickstart_block_runs` (corre `capmd toc` contra fixture, exit 0 + output no vacio), `test_capmd_version_executable`, `test_capmd_help_executable`, `test_capmd_config_init_executable` (con `HOME=tmp_path`).
+- `Makefile` (nuevo, raiz) — targets `test`, `test-fast`, `test-cov`, `test-docs`, `docs`, `docs-clean`, `docs-serve`, `lint`, `fmt`, `verify`, `clean`. Con auto-help via `awk` regex.
+
+Decisiones locked-in (de las preguntas):
+- **Cleaners doc shape**: documento largo por cleaner (~800 LoC, J5 emphasis). Cada uno con qué reescribe, qué NO toca, link al test, cómo deshabilitar.
+- **Docs site**: **Sphinx** + MyST + Furo. Integración nativa con el ecosistema Python, autodoc extrae docstrings, theme Furo moderno.
+- **Test contract**: **`tests/test_docs.py`** parsea bloques bash del README y los ejecuta. Mantiene el README ejecutable, captura regresiones cuando un comando del README queda obsoleto.
+
+Validación final:
+- `pytest tests/test_docs.py --no-cov`: 7 passed.
+- `pytest --cov=capmd --cov-report=term`: `TOTAL ... 99.4%` (sin regresión).
+- `ruff check src tests`: All checks passed.
+- `mypy src/capmd`: Success, no issues found in 67 source files.
+- **Sphinx build**: `make docs` → `build succeeded, 1 warning`. Output en `docs/_build/html/` (15 archivos: index.html, cleaners.html, configuration.html, etc.).
+- **Test contracto**: `capmd version`, `capmd --help`, `capmd config init`, `capmd toc <fixture>` exit 0 + output no vacio contra el binario instalado.
+
+Out of scope explicito (no se hace en J5):
+- **K1+** (plugin markitdown, etc.).
+- **Publicar el sitio en GitHub Pages** (requeriria GH Actions + branch gh-pages; proyecto veta GH Actions).
+- **i18n**: el sitio queda en Castellano (mismo idioma del README y del usuario).
+- **API reference exhaustiva**: solo los 8 modulos publicos (clean/convert/sources/images/output/cli/config/models). El resto no se documenta publicamente.
+- **Sphinx autodoc run completo**: los `modules/*.md` son skeletons con `automodule`; el maintainer corre `sphinx-apidoc` para regenerarlos cuando cambian los modulos (documentado en docs/index.md).
 
 ---
 
