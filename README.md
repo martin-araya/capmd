@@ -718,6 +718,36 @@ Pre-requisitos del maintainer (documentados en el README y en `agent.md`):
 - `gh` autenticado (`brew install gh && gh auth login`).
 - `brew` con tap `martin-araya/capmd` configurado (I1, I4).
 - Working tree limpio al momento de tagear.
+
+### Publicación a PyPI (J4)
+
+Tras crear el GitHub Release, el maintainer sube el wheel + sdist a PyPI. La mecánica usa `uv publish` con `UV_PUBLISH_TOKEN`:
+
+```bash
+# 4. TestPyPI primero (validamos antes de pegar el salto a producción).
+UV_PUBLISH_TOKEN=$TESTPYPI_TOKEN bash scripts/publish.sh 0.2.0 --to testpypi
+UV_PUBLISH_TOKEN=$TESTPYPI_TOKEN bash scripts/verify-pypi-install.sh 0.2.0 --target testpypi
+
+# 5. Si el smoke OK, mismo flujo a PyPI real.
+UV_PUBLISH_TOKEN=$PYPI_TOKEN bash scripts/publish.sh 0.2.0 --to pypi
+UV_PUBLISH_TOKEN=$PYPI_TOKEN bash scripts/verify-pypi-install.sh 0.2.0
+```
+
+Contrato del roadmap: "`pip install capmd` en un venv limpio convierte un PDF". `scripts/verify-pypi-install.sh` lo verifica con un venv fresco + un PDF generado por `tests.fixtures.build` + `capmd convert`.
+
+Tokens: NUNCA commitearlos. Mantener en `~/.config/capmd/pypi.env` (chmod 600) o un keychain (1Password, macOS Keychain). Para generar tokens: PyPI `pypi-...` en https://pypi.org/manage/account/token/, TestPyPI en https://test.pypi.org/manage/account/token/.
+
+Dry-run local sin gastar token:
+
+```bash
+bash scripts/publish.sh 0.2.0 --to testpypi --dry-run   # valida version + artefactos
+```
+
+Skip del smoke test (util en sandbox sin red):
+
+```bash
+CAPMD_SKIP_PYPI_VERIFY=1 bash scripts/verify-pypi-install.sh 0.2.0
+```
 ```
 
 Las excepciones defensivas (ej: `except Exception: pass` dentro de pools de pypdfium2 o file-locks de fcntl) se marcan con `# pragma: no cover` quirúrgicamente. El módulo está completo en `tests/test_j1_coverage_gaps.py`, `tests/test_j1_coverage_inspect.py`, `tests/test_clean_noop.py` y `tests/test_convert_limits.py`.

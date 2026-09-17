@@ -86,7 +86,7 @@ queda sin documentar en `--help`.
 ```bash
 brew install git-cliff           # o cargo install git-cliff
 bash scripts/install-hooks.sh    # git config core.hooksPath scripts/hooks
-bash scripts/bump-version.sh     # sugiere proxima version y parchea pyproject.toml
+bash scripts/bump-version.sh     # sugiere próxima version y parchea pyproject.toml
 git tag -a v0.2.0 -m "..."       # el hook dispara scripts/release.sh
 ```
 
@@ -96,6 +96,24 @@ git tag -a v0.2.0 -m "..."       # el hook dispara scripts/release.sh
 - **`scripts/bump-version.sh`**: wrapper sobre `git-cliff --bump` + sed a `pyproject.toml`. El maintainer revisa el diff antes de commit.
 - **`CHANGELOG.md`**: bootstrap manual (Keep-a-Changelog format). git-cliff lo regenera en cada release desde `git log` + conventional commits.
 - Pre-requisito: `brew install git-cliff` y `gh auth login`. Sin esto el hook falla o aborta.
+
+## Publicación a PyPI (J4)
+
+Tras el GitHub Release, el maintainer sube el wheel + sdist a TestPyPI primero, valida con el smoke test, y luego sube a PyPI real.
+
+```bash
+UV_PUBLISH_TOKEN=$TESTPYPI_TOKEN bash scripts/publish.sh 0.2.0 --to testpypi
+UV_PUBLISH_TOKEN=$TESTPYPI_TOKEN bash scripts/verify-pypi-install.sh 0.2.0 --target testpypi
+UV_PUBLISH_TOKEN=$PYPI_TOKEN bash scripts/publish.sh 0.2.0 --to pypi
+UV_PUBLISH_TOKEN=$PYPI_TOKEN bash scripts/verify-pypi-install.sh 0.2.0
+```
+
+- **`scripts/publish.sh X.Y.Z --to {testpypi|pypi}`**: valida version + artefactos en `dist/`, requiere `UV_PUBLISH_TOKEN`, llama `uv publish` con el `--publish-url` correspondiente. `--dry-run` no toca red. Acepta `[WORKDIR]` opcional para tests.
+- **`scripts/verify-pypi-install.sh X.Y.Z [--target ...]`**: smoke test del contrato J4. Crea venv limpio (`mktemp -t capmd-pypi-verify.*`), `pip install capmd==X.Y.Z`, genera PDF con `tests.fixtures.build`, `capmd convert`, valida exit 0 + markdown no vacio. Skip con `CAPMD_SKIP_PYPI_VERIFY=1`.
+- **Tokens**: `pypi-...` para PyPI y TestPyPI, generados en sus respectivos websites. Mantener en `~/.config/capmd/pypi.env` (chmod 600) o keychain. **NUNCA commitear.**
+- **markitdown** es runtime dependency declarada en `pyproject.toml` (no vendorizado) con extras `[pdf,docx,pptx,xlsx]`. PyPI resuelve la install via su index.
+- **Trusted publishing (OIDC)** NO se usa: requiere CI runner; el proyecto veta GH Actions.
+- **No re-upload**: PyPI no permite re-upload de la misma version. Yanking solo via UI web.
 
 ## Qué no hacer
 - No agregar dependencias nuevas sin justificarlo contra las que ya están.
