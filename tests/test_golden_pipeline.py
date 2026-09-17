@@ -30,7 +30,6 @@ from capmd.convert import Engine
 from capmd.models import Format, SourceDoc
 from tests.fixtures import build as fix_build
 
-
 # ---------------------------------------------------------------------------
 # Builders parametrizados. Para fixtures que reciben ``work_dir``, usar
 # ``tmp_path`` como ambos argumentos (out_path y work_dir).
