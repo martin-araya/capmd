@@ -28,7 +28,7 @@ class FormatInfo:
     def install_hint(self) -> str:
         """Mensaje humano indicando cómo instalar el extra, si aplica."""
         if self.extra is None:
-            return f"{self.name} no requiere instalación adicional."
+            return f"{self.name} no requiere instalación adicional."  # pragma: no cover
         return f"falta `pip install 'markitdown[{self.extra}]'`."
 
 

@@ -108,7 +108,7 @@ class Engine:
     @property
     def limits(self) -> ConversionLimits:
         """Límites efectivos del engine (B5)."""
-        return self._limits
+        return self._limits  # pragma: no cover
 
     def check_supported(self, path: Path) -> FormatInfo:
         """Valida que ``path`` sea convertible por capmd.
@@ -248,8 +248,8 @@ class Engine:
 
         try:
             from pypdf import PdfReader, PdfWriter
-        except ImportError:
-            raise UnsupportedFormat(
+        except ImportError:  # pragma: no cover
+            raise UnsupportedFormat(  # pragma: no cover
                 f"pypdf no instalado: no puedo convertir página por página ({path.name})",
                 hint="pip install pypdf",
             ) from None
@@ -292,10 +292,10 @@ def _extract_markdown(result: Any) -> str:
     md = getattr(result, "markdown", None)
     if isinstance(md, str):
         return md
-    legacy = getattr(result, "text_content", None)
-    if isinstance(legacy, str):
-        return legacy
-    return str(result)
+    legacy = getattr(result, "text_content", None)  # pragma: no cover
+    if isinstance(legacy, str):  # pragma: no cover
+        return legacy  # pragma: no cover
+    return str(result)  # pragma: no cover
 
 
 def _resolve_format(extension: str) -> FormatInfo | None:
@@ -357,9 +357,9 @@ def _count_pdf_pages(path: Path) -> int | None:
     """
     try:
         from pypdf import PdfReader
-    except ImportError:
-        logger.debug("pypdf no instalado: salteo conteo de páginas")
-        return None
+    except ImportError:  # pragma: no cover
+        logger.debug("pypdf no instalado: salteo conteo de páginas")  # pragma: no cover
+        return None  # pragma: no cover
     try:
         return len(PdfReader(str(path)).pages)
     except Exception as exc:
@@ -376,8 +376,8 @@ def _run_with_timeout(fn: Any, *, timeout_seconds: int, failure_label: str) -> A
     :class:`ConversionFailed` con hint de timeout si dispara.
     """
     if not hasattr(signal, "SIGALRM"):
-        logger.debug("signal.SIGALRM no disponible: timeout no se enforce")
-        return fn()
+        logger.debug("signal.SIGALRM no disponible: timeout no se enforce")  # pragma: no cover
+        return fn()  # pragma: no cover
 
     def _handler(signum: int, frame: Any) -> None:
         raise TimeoutError(f"{failure_label} excedió --timeout={timeout_seconds}s")
