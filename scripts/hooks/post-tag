@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+# post-tag hook — invocado por git tras `git tag -a vX.Y.Z -m "..."`.
+# Trigger del release pipeline de capmd (J3).
+#
+# Activar via:
+#   git config core.hooksPath scripts/hooks
+# (scripts/install-hooks.sh automatiza esto).
+#
+# El hook:
+#   - Ignora tags lightweight y non-semver (no son releases).
+#   - Extrae la version del tag (refs/tags/vX.Y.Z → X.Y.Z).
+#   - Invoca scripts/release.sh $VERSION, que se ocupa del build + push + gh release.
+
+set -eu
+
+# Argumentos que pasa git al hook:
+#   $1 = nombre del ref (refs/tags/v0.1.0)
+#   $2 = SHA del commit
+#   $3 = tipo ("tag", "commit", etc.)
+TAG_REF="${1:-}"
+TAG_TYPE="${3:-}"
+
+# Ignorar todo lo que no sea annotated tag semver.
+case "$TAG_REF" in
+  refs/tags/v[0-9]*.[0-9]*.[0-9]*)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+VERSION="${TAG_REF#refs/tags/v}"
+
+# Resolver repo root desde la ubicación de este hook.
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HOOK_DIR/../.." && pwd)"
+
+echo "[post-tag] release de v$VERSION disparado"
+exec "$REPO_ROOT/scripts/release.sh" "$VERSION"
