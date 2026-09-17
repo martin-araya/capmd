@@ -707,9 +707,38 @@ Out of scope explicito (no se hace en J3):
 - Firma GPG de tags (opcional, no requerida).
 - `commitlint` enforcement: solo documentacion.
 
-**J4. Publicación en PyPI**
-`uv build` + `twine upload`, con `markitdown` como dependencia declarada (no vendorizado).
-*Test:* `pip install capmd` en un venv limpio convierte un PDF.
+**✅ J4. Publicación en PyPI**
+`uv build` + `uv publish` (no `twine`) con `markitdown[pdf,docx,pptx,xlsx]>=0.1.7` como dep runtime declarada (`pyproject.toml:30`, no vendorizado). Workflow: TestPyPI primero con smoke test, después PyPI. Token via `UV_PUBLISH_TOKEN` env var (NO commiteado). Metadata PyPI completo: `[project.urls]` con Homepage+Issues+Changelog+Source, classifier `Implementation :: CPython`, sdist incluye README + pyproject + roadmap + agent. PyPI renderiza README.md como long-description.
+*Test:* `pip install capmd` en venv limpio convierte un PDF. ✅ 23 tests nuevos (publish.sh + verify-pypi-install.sh + pyproject metadata); cobertura sigue en 99.4%.
+
+Implementado en:
+- `scripts/publish.sh` (nuevo, ~85 LoC, chmod +x) — entry point del upload. Validates version contra pyproject.toml, exige `dist/capmd-X.Y.Z.{tar.gz,whl}` (los construye `scripts/release.sh`), requiere `UV_PUBLISH_TOKEN` salvo con `--dry-run`, mapea `--to {testpypi,pypi}` a `--publish-url` correcto, llama `uv publish`. Acepta `[WORKDIR]` opcional para tests. `--dry-run` valida todo sin tocar red (util cuando el maintainer prepara dos tokens y verifica antes de gastar uno).
+- `scripts/verify-pypi-install.sh` (nuevo, ~85 LoC, chmod +x) — smoke test del contrato J4. Crea venv limpio con `mktemp -t capmd-pypi-verify.*` (no `/tmp` directo), `pip install capmd==X.Y.Z` desde PyPI o TestPyPI, genera PDF con `tests.fixtures.build.build_headings_pdf`, corre `capmd convert`, valida exit 0 + markdown no vacio. Skip con `CAPMD_SKIP_PYPI_VERIFY=1`.
+- `pyproject.toml` — agregado a `[project.urls]`: `Changelog = "https://github.com/martin-araya/capmd/blob/main/CHANGELOG.md"` + `Source = "https://github.com/martin-araya/capmd"`. Classifier `Programming Language :: Python :: Implementation :: CPython`.
+- `tests/test_publish.py` (nuevo, 7 tests) — mockea `uv` en PATH (shim que registra invocaciones). Valida: `test_publish_rejects_unknown_target`, `test_publish_validates_version`, `test_publish_requires_artifacts`, `test_publish_requires_token`, `test_publish_dry_run_skips_upload`, `test_publish_testpypi_url` (test.pypi.org), `test_publish_pypi_url` (upload.pypi.org). Cada test corre en `tmp_path` separado + artefactos fakes + `pyproject.toml` con `version = "0.2.0"`.
+- `tests/test_verify_pypi_install.py` (nuevo, 6 tests) — mocks `python3 -m venv` + `pip` + `capmd` para verificar la secuencia del script. Valida: `test_verify_rejects_unknown_target`, `test_verify_skip_env_var`, `test_verify_testpypi_uses_index_url`, `test_verify_pypi_no_index_url`, `test_verify_calls_capmd_convert`, `test_verify_latest_pkg_when_version_not_semver`.
+- `tests/test_pyproject_pypi_metadata.py` (nuevo, 10 tests) — verifica metadata PyPI-critico con `tomllib` stdlib: `markitdown` declarada como dep con extras correctos, entry point `capmd = "capmd.cli:app"`, `readme = "README.md"` resuelve a archivo, `[project.urls]` poblado con Changelog + Source, classifiers de Python, `requires-python >= 3.X`, sdist incluye `pyproject.toml` + `README.md` (PyPI long-description).
+
+Decisiones locked-in (de las preguntas):
+- **Upload location**: `scripts/publish.sh` separado de `scripts/release.sh` para desacoplar credenciales y responsabilidades (GitHub vs PyPI).
+- **Staging**: **TestPyPI primero** con `scripts/verify-pypi-install.sh --target testpypi`, después PyPI real. Dos pushes por release.
+- **Credential storage**: **`UV_PUBLISH_TOKEN`** env var, compatible con tokens `pypi-...` de PyPI y TestPyPI. NO `.pypirc`, NO `.env` commiteado. Documentado en README y agent.md (mantener en `~/.config/capmd/pypi.env` chmod 600 o keychain).
+- **Verify contract**: **`scripts/verify-pypi-install.sh`** manual, NO test pytest (requiere red + venv + PyPI, fuera del scope del modelo sin CI). Mantenido como script ejecutable.
+
+Validación final:
+- `pytest tests/test_publish.py tests/test_verify_pypi_install.py tests/test_pyproject_pypi_metadata.py`: 23 passed.
+- `pytest --cov=capmd --cov-report=term`: `TOTAL ... 99.4%` (sin regresión; nuevos archivos están en `tests/` que no entra en `source = ["src/capmd"]`).
+- `ruff check src tests`: All checks passed.
+- `mypy src/capmd`: Success, no issues found in 67 source files.
+- **Smoke test del publish** (local, sin token): `bash scripts/publish.sh 0.1.0 --dry-run` valida version + artefactos, exit 0 sin tocar red. Sin `--dry-run`, aborta con "UV_PUBLISH_TOKEN no esta seteado" si el env no esta.
+- **Smoke test del verify**: skip via `CAPMD_SKIP_PYPI_VERIFY=1` exit 0 sin ejecutar pip ni capmd.
+
+Out of scope explicito (no se hace en J4):
+- **J5** (`docs/cleaners.md` + README expansion).
+- **K1+** (plugin markitdown y siguientes).
+- **CI para publish automatico** (trusted publisher / OIDC): requiere GH Actions, vetado por el proyecto.
+- **Yanking / re-upload**: solo via UI web de PyPI; no se automatiza.
+- **Version pinning de `markitdown`**: queda como `>=0.1.7` (lower bound only). La decision de cap superior (`<0.2`) es scope future.
 
 **J5. README y docs**
 El README de este mismo paquete, más `docs/cleaners.md` explicando qué hace cada limpiador y cómo desactivarlo.
