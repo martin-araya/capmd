@@ -13,6 +13,25 @@ from capmd.errors import IOError
 from tests.fixtures import build
 
 
+@pytest.fixture
+def _fixed_now(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Inyecta ``_now_iso`` en ``capmd.output.writer`` con un valor constante.
+
+    LOW #12: evita que ``converted_at:`` difiera entre invocaciones
+    consecutivas del CLI cuando cruzan el segundo, lo que rompe
+    ``assert out_a.read_text() == out_b.read_text()`` en los tests
+    que comparan byte-a-byte.
+
+    Se parchea el módulo de origen (``capmd.output.writer``) porque
+    ``cli.py`` importa ``_now_iso`` de manera lazy dentro de la
+    función que lo usa; ``capmd.cli._now_iso`` no existe como
+    atributo de módulo hasta que esa función corre por primera vez.
+    """
+    fixed = "2026-01-01T00:00:00Z"
+    monkeypatch.setattr("capmd.output.writer._now_iso", lambda *a, **kw: fixed)
+    return fixed
+
+
 def test_convert_writes_to_output_file(tmp_path: Path) -> None:
     """Test literal del roadmap B3."""
     pdf = build.build_headings_pdf(tmp_path / "headings.pdf")
@@ -488,7 +507,7 @@ def test_convert_chapter_by_title_slices_correct_range(tmp_path: Path) -> None:
     assert "Chapter 3" not in text
 
 
-def test_convert_chapter_both_forms_produce_same_output(tmp_path: Path) -> None:
+def test_convert_chapter_both_forms_produce_same_output(tmp_path: Path, _fixed_now: str) -> None:
     """``--chapter 3`` y ``--chapter 'Ownership'`` producen markdown idéntico."""
     pdf = build.build_outline_toc_pdf(tmp_path / "outline_toc.pdf")
     out_idx = tmp_path / "by_index.md"
@@ -618,7 +637,7 @@ def test_convert_pages_offset_translates_range(tmp_path: Path) -> None:
         assert f"MARKER-PAGE-{n}" not in text, f"página {n} colada"
 
 
-def test_convert_pages_offset_zero_is_no_op(tmp_path: Path) -> None:
+def test_convert_pages_offset_zero_is_no_op(tmp_path: Path, _fixed_now: str) -> None:
     pdf = _build_numbered_pdf(tmp_path / "p.pdf", n_pages=10)
     out_a = tmp_path / "a.md"
     out_b = tmp_path / "b.md"
