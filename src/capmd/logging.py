@@ -40,7 +40,6 @@ def configure_logging(verbose: int) -> None:
     handler.setFormatter(logging.Formatter(_FORMAT))
     logger.addHandler(handler)
     logger.setLevel(level)
-    logger.propagate = False
 
 
 def configure_quiet() -> None:
@@ -56,7 +55,6 @@ def configure_quiet() -> None:
         handler = logging.StreamHandler(stream=sys.stderr)  # pragma: no cover
         handler.setFormatter(logging.Formatter(_FORMAT))  # pragma: no cover
         logger.addHandler(handler)  # pragma: no cover
-        logger.propagate = False  # pragma: no cover
     logger.setLevel(logging.CRITICAL)
 
 

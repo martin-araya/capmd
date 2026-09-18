@@ -69,9 +69,14 @@ def test_info_visible_with_verbose_1(capsys: pytest.CaptureFixture[str]) -> None
     assert "info msg" in captured.err
 
 
-def test_propagate_is_false() -> None:
+def test_propagate_is_true_for_caplog_compat() -> None:
+    """BUGS.md MEDIUM #3: ``logger.propagate`` es True para que pytest
+    pueda capturar vía ``caplog`` (que hookea el root logger). Antes era
+    False, lo que silenciaba los ``logger.warning`` de ``capmd.config``
+    y rompía 9 tests de validación TOML.
+    """
     configure_logging(2)
-    assert get_logger().propagate is False
+    assert get_logger().propagate is True
 
 
 def test_get_logger_with_name() -> None:
