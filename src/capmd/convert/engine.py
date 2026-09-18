@@ -9,19 +9,32 @@ remotos, que no es lo que queremos.
 
 Los métodos devuelven :class:`capmd.models.ConversionOutput` para
 reportar tiempo, tamaño y páginas al caller (B5).
+
+K4: para enrutamiento a Azure Doc Intelligence / Content
+Understanding, ``convert_path_via_azure`` spawna el CLI ``markitdown``
+(que sí expone ``-d``, ``--use-cu``, ``-e``, ``--cu-endpoint``,
+``--cu-analyzer``, ``--cu-file-types``). El output del subprocess
+vuelve por el mismo pipeline que ``convert_path`` (cleaners, FM,
+images, hooks, study, split).
 """
 
 from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import signal
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from markitdown import MarkItDown, StreamInfo
 
+from capmd.convert.azure import (
+    AzureRouting,
+    run_markitdown_subprocess,
+)
 from capmd.convert.formats import (
     SUPPORTED_FORMATS,
     FormatInfo,
@@ -29,6 +42,8 @@ from capmd.convert.formats import (
 )
 from capmd.convert.limits import DEFAULT_LIMITS, ConversionLimits
 from capmd.errors import (
+    AzureBackendMissing,
+    AzureConversionFailed,
     ConversionFailed,
     InputTooLarge,
     SourceNotFound,
@@ -175,6 +190,91 @@ class Engine:
             size_bytes=size_bytes,
         )
 
+    def convert_path_via_azure(
+        self,
+        path: Path,
+        routing: AzureRouting,
+        *,
+        limits: ConversionLimits | None = None,
+    ) -> ConversionOutput:
+        """Convierte usando ``markitdown`` CLI como subprocess (K4).
+
+        El resto del pipeline (cleaners, FM, images, hooks, study,
+        split) opera sobre el markdown retornado igual que en
+        :meth:`convert_path` — el Azure solo reemplaza el step de
+        extracción inicial.
+
+        Levanta:
+            :class:`AzureBackendMissing`: si ``markitdown`` no está en PATH.
+            :class:`AzureConversionFailed`: si el subprocess falla o
+                supera el timeout.
+        """
+        if not routing.is_active:
+            raise ValueError(
+                "convert_path_via_azure requiere routing.is_active=True"
+            )
+
+        effective = limits or self._limits
+        if not path.exists() or not path.is_file():
+            raise SourceNotFound(
+                f"no se encontró el archivo: {path}",
+                hint="verificá la ruta o pasá el archivo por stdin con --ext",
+            )
+        # Mismos chequeos de tamaño que convert_path: el Azure también
+        # gasta API quota, así que respetar el cap local tiene sentido.
+        info = self.check_supported(path)
+        size_bytes = path.stat().st_size
+        _check_size_limit(size_bytes, effective, source=path.name)
+
+        # Construir argv; capmd spawnea markitdown a un tmpfile propio
+        # para no colisionar con el `-o FILE` / `--out DIR` del usuario.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_md = Path(tmpdir) / "markitdown_output.md"
+            # Honor ``CAPMD_MARKITDOWN_BIN`` (env var) para tests/CI que
+            # necesitan un binario markitdown específico (e.g., shim).
+            search_path = os.environ.get("CAPMD_MARKITDOWN_BIN")
+            argv = build_azure_argv(
+                input_path=str(path),
+                output_path=str(tmp_md),
+                routing=routing,
+                search_path=search_path,
+            )
+            logger.debug(
+                "Azure routing: %s", " ".join(argv[1:])
+            )
+
+            start = time.perf_counter()
+            try:
+                run_markitdown_subprocess(
+                    input_path=str(path),
+                    output_path=str(tmp_md),
+                    routing=routing,
+                )
+            except (AzureBackendMissing, AzureConversionFailed):
+                raise
+            except Exception as exc:  # pragma: no cover - defensive
+                raise ConversionFailed(
+                    f"markitdown (Azure) error inesperado: {exc}",
+                    hint=str(exc),
+                ) from exc
+
+            markdown = tmp_md.read_text(encoding="utf-8")
+
+        elapsed = time.perf_counter() - start
+        page_count = _count_pdf_pages(path) if info.extension == ".pdf" else None
+        logger.debug(
+            "Azure ok: %d chars en %.3fs (backend=%s)",
+            len(markdown),
+            elapsed,
+            "CU" if routing.use_cu else "DocIntel",
+        )
+        return ConversionOutput(
+            markdown=markdown,
+            elapsed_seconds=elapsed,
+            page_count=page_count,
+            size_bytes=size_bytes,
+        )
+
     def convert_stream(
         self,
         stream: BinaryIO,
@@ -310,6 +410,38 @@ def _check_extra_installed(info: FormatInfo, *, source_name: str) -> None:
             f"falta el extra de markitdown para {info.name}: {source_name}",
             hint=info.install_hint(),
         )
+
+
+def build_azure_argv(
+    input_path: str,
+    output_path: str,
+    routing: AzureRouting,
+    *,
+    search_path: str | None = None,
+) -> list[str]:
+    """Re-export del argv builder de capmd.convert.azure (K4).
+
+    Existe como helper separado para que los tests del Engine
+    puedan mockear el subprocess sin tocar ``run_markitdown_subprocess``.
+
+    ``search_path`` permite a los tests inyectar un binario
+    ``markitdown`` específico (path absoluto al shim) sin contaminar
+    ``os.environ``.
+    """
+    import shutil
+    from pathlib import Path as _Path
+
+    from capmd.convert.azure import build_markitdown_argv
+
+    argv = build_markitdown_argv(input_path, output_path, routing)
+    # Resolver el binario ``markitdown``. Si ``search_path`` apunta a
+    # un binario específico (test shim), usarlo directo. Si no,
+    # ``shutil.which`` con PATH del proceso.
+    if search_path and _Path(search_path).is_file():
+        argv[0] = search_path
+    else:
+        argv[0] = shutil.which("markitdown", path=search_path) or "markitdown"
+    return argv
 
 
 def _check_size_limit(size_bytes: int, limits: ConversionLimits, *, source: str) -> None:

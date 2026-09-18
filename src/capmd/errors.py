@@ -63,3 +63,24 @@ class ChapterDetectionFailed(CapmdError):
     """La heurística de outline no encontró capítulos en un PDF sin outline."""
 
     exit_code = 4
+
+
+class AzureBackendMissing(CapmdError):
+    """El binario ``markitdown`` no está en PATH (K4).
+
+    capmd usa ``markitdown`` como subprocess para enrutar a Azure
+    Doc Intelligence / Content Understanding. Si no se encuentra en
+    PATH, este error se levanta antes de intentar nada.
+    """
+
+    exit_code = 3
+
+
+class AzureConversionFailed(CapmdError):
+    """El subprocess de ``markitdown`` con backend Azure falló (K4).
+
+    Captura el stderr del subprocess para dar contexto actionable
+    (e.g., falta el extra de Azure, timeout, endpoint inválido).
+    """
+
+    exit_code = 5
