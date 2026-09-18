@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping
 from functools import wraps
@@ -13,6 +14,7 @@ from typing import Any, Literal, TypeVar, cast
 import typer
 from rich.console import Console
 
+import capmd
 from capmd import registry as _registry_mod
 from capmd.clean.cleaner import CleanerStat
 from capmd.convert import DEFAULT_LIMITS, ConversionLimits, Engine, parse_size
@@ -614,6 +616,117 @@ def convert(
             "una sola vez, o cuando querés forzar re-parseo del outline."
         ),
     ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "(K2) Perfil de output. Valores: study. Activa metadata "
+            "extra en el front matter (tags, reading_status, started_at, "
+            "finished_at) y appendea secciones vacías al final del "
+            "cuerpo para tomar notas (## Resumen / ## Conceptos clave "
+            "/ ## Dudas)."
+        ),
+    ),
+    tag: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--tag",
+        help=(
+            "(K2) Tag para el front matter de --profile study "
+            "(repetible). Ej: --tag rust --tag ownership."
+        ),
+    ),
+    reading_status: str | None = typer.Option(
+        None,
+        "--reading-status",
+        help=(
+            "(K2) Estado de lectura inicial (--profile study). "
+            "Valores: unread (default), in_progress, read. Si se pasa "
+            "in_progress se setea started_at; si se pasa read se setea "
+            "finished_at (solo si el campo estaba vacío)."
+        ),
+    ),
+    reset_study: bool = typer.Option(
+        False,
+        "--reset-study",
+        help=(
+            "(K2) Con --profile study, limpia started_at y finished_at "
+            "del archivo previo antes de regenerar. Default: preservar "
+            "fechas editadas manualmente por el usuario."
+        ),
+    ),
+    use_cu: bool = typer.Option(
+        False,
+        "--use-cu",
+        "--use-content-understanding",
+        help=(
+            "(K4) Usa Azure Content Understanding para extraer el "
+            "markdown del archivo (PDFs escaneados / layouts complejos). "
+            "Lee endpoint de --cu-endpoint o de MARKITDOWN_CU_ENDPOINT. "
+            "Mutuamente excluyente con -d/--use-docintel."
+        ),
+    ),
+    use_docintel: bool = typer.Option(
+        False,
+        "-d",
+        "--use-docintel",
+        help=(
+            "(K4) Usa Azure Document Intelligence en lugar del extractor "
+            "local de markitdown. Lee endpoint de -e/--endpoint o de "
+            "MARKITDOWN_DOCINTEL_ENDPOINT. Mutuamente excluyente con --use-cu."
+        ),
+    ),
+    docintel_endpoint: str | None = typer.Option(
+        None,
+        "-e",
+        "--endpoint",
+        help=(
+            "(K4) Endpoint de Azure Document Intelligence. Si se omite y "
+            "está activada -d, se lee de MARKITDOWN_DOCINTEL_ENDPOINT."
+        ),
+    ),
+    cu_endpoint: str | None = typer.Option(
+        None,
+        "--cu-endpoint",
+        help=(
+            "(K4) Endpoint de Azure Content Understanding. Si se omite y "
+            "está activado --use-cu, se lee de MARKITDOWN_CU_ENDPOINT."
+        ),
+    ),
+    cu_analyzer: str | None = typer.Option(
+        None,
+        "--cu-analyzer",
+        help=(
+            "(K4) Analyzer ID de Content Understanding (ej: "
+            "'prebuilt-documentAnalyzer'). Si se omite, markitdown "
+            "auto-selecciona según el tipo de archivo."
+        ),
+    ),
+    cu_file_types: str | None = typer.Option(
+        None,
+        "--cu-file-types",
+        help=(
+            "(K4) Comma-separated list de tipos de archivo a enrutar a "
+            "Content Understanding (ej: 'pdf,jpeg,mp4'). Si se omite, "
+            "markitdown enruta todos los tipos soportados."
+        ),
+    ),
+    cache_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cache-dir",
+        help=(
+            "(K6) Directorio de cache de conversión. Default: "
+            "$XDG_CACHE_HOME/capmd/convert/. Override también via env "
+            "var CAPMD_CACHE_DIR."
+        ),
+    ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help=(
+            "(K6) Forzar reconversión incluso si hay cache hit. "
+            "Skip read+write del cache. Equivalente a CAPMD_NO_CACHE=1."
+        ),
+    ),
 ) -> None:
     """Convierte un archivo a Markdown vía markitdown."""
     try:
@@ -688,6 +801,24 @@ def convert(
     if flat and out_dir is None:
         raise typer.BadParameter("--flat requiere --out")
 
+    # K4: -d y --use-cu son mutuamente excluyentes (typer enforcement).
+    _use_cu: bool = use_cu if isinstance(use_cu, bool) else False
+    _use_docintel: bool = use_docintel if isinstance(use_docintel, bool) else False
+    if _use_cu and _use_docintel:
+        raise typer.BadParameter(
+            "-d/--use-docintel y --use-cu son mutuamente excluyentes"
+        )
+
+    # K4: limpiar los args de sentinel de typer.
+    _docintel_endpoint: str | None = (
+        docintel_endpoint if isinstance(docintel_endpoint, str) else None
+    )
+    _cu_endpoint: str | None = cu_endpoint if isinstance(cu_endpoint, str) else None
+    _cu_analyzer: str | None = cu_analyzer if isinstance(cu_analyzer, str) else None
+    _cu_file_types: str | None = (
+        cu_file_types if isinstance(cu_file_types, str) else None
+    )
+
     split_normalized = split.lower() if isinstance(split, str) else None
     if split_normalized is not None:
         if out_dir is None:
@@ -711,6 +842,68 @@ def convert(
         raise typer.BadParameter(
             "--force y --suffix son mutuamente excluyentes"
         )
+
+    # K2: validar --profile y --reading-status.
+    # ``profile`` puede llegar como ``typer.Option`` sentinel cuando se
+    # llama a ``convert()`` directamente desde tests sin pasar el kwarg;
+    # el sentinel no es ``None`` ni string. Mismo caso para
+    # ``reading_status`` y ``tag``.
+    from capmd.study import PROFILES, validate_reading_status
+
+    _profile_str: str | None = profile if isinstance(profile, str) else None
+    _reading_status_str: str | None = (
+        reading_status if isinstance(reading_status, str) else None
+    )
+    _reset_study_bool: bool = (
+        bool(reset_study) if isinstance(reset_study, bool) else False
+    )
+    _tag_list: list[str] | None = tag if isinstance(tag, list) else None
+
+    if _profile_str is not None and _profile_str not in PROFILES:
+        raise typer.BadParameter(
+            f"--profile {_profile_str!r} no soportado. Valores válidos: "
+            f"{', '.join(PROFILES)}"
+        )
+    if _reading_status_str is not None:
+        try:
+            validate_reading_status(_reading_status_str)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
+
+    # K2: resolver tags y reading_status con precedencia CLI > book profile.
+    _cli_tags: tuple[str, ...] = tuple(_tag_list) if _tag_list else ()
+    _cli_status: str | None = _reading_status_str
+
+    _book_tags: tuple[str, ...] | None = None
+    _book_reading_status: str | None = None
+    if _book_profile is not None:
+        _book_tags = _book_profile.tags
+        _book_reading_status = _book_profile.reading_status
+
+    if not _cli_tags and _book_tags is not None:
+        _cli_tags = _book_tags
+    if _cli_status is None and _book_reading_status is not None:
+        _cli_status = _book_reading_status
+
+    # K4: resolver routing Azure (CLI flag > env var). Si hay flag CLI
+    # de Azure, se activa el routing aunque no haya endpoint (markitdown
+    # CLI fallará con su propio mensaje si falta endpoint).
+    from capmd.convert.azure import AzureRouting, resolve_azure_routing
+
+    _timeout_for_azure = (
+        timeout if isinstance(timeout, int) and timeout > 0 else None
+    )
+    _azure_routing: AzureRouting = resolve_azure_routing(
+        cli_use_cu=_use_cu,
+        cli_use_docintel=_use_docintel,
+        cli_docintel_endpoint=_docintel_endpoint,
+        cli_cu_endpoint=_cu_endpoint,
+        cli_cu_analyzer=_cu_analyzer,
+        cli_cu_file_types=_cu_file_types,
+        timeout_seconds=(
+            float(_timeout_for_azure) if _timeout_for_azure else 600.0
+        ),
+    )
 
     # EPUB no soporta --pages ni --page-offset (no hay paginación física).
     # Validamos temprano para fallar con mensaje claro antes de abrir el archivo.
@@ -816,6 +1009,13 @@ def convert(
         _cfg=_cfg,
         _title_pattern=_title_pattern,
         _quiet=_quiet,
+        profile=_profile_str,
+        cli_tags=_cli_tags,
+        cli_status=_cli_status,
+        reset_study=_reset_study_bool,
+        azure_routing=_azure_routing,
+        cache_dir=cache_dir,
+        no_cache=no_cache,
     )
 
 
@@ -870,6 +1070,13 @@ def _run_convert_body(
     _cfg: Any,
     _title_pattern: str | None,
     _quiet: bool,
+    profile: str | None = None,
+    cli_tags: tuple[str, ...] = (),
+    cli_status: str | None = None,
+    reset_study: bool = False,
+    azure_routing: Any = None,
+    cache_dir: Path | None = None,
+    no_cache: bool = False,
 ) -> None:
     """Cuerpo principal de ``convert`` envuelto en ``stages()`` (H1).
 
@@ -881,6 +1088,10 @@ def _run_convert_body(
       cuando ``_quiet`` es False.
     """
     sliced_temp: Path | None = None
+    # K6 cache sentinels — inicializados al top para que las refs en stdin
+    # path y path branch (líneas 1348 y 1435) no disparen UnboundLocalError.
+    # El lookup real ocurre solo en el path branch (no en stdin/Azure).
+    _cache_hit_markdown: str | None = None
     extract_pages: list[int] | None = None
     chapter_index: int = 1
     resolved_chapter: Chapter | None = None
@@ -996,7 +1207,66 @@ def _run_convert_body(
                 prog.stop(_t_recorte)
 
             _t_conv = prog.start("conversión", total=None)
-            result = engine.convert_path(target_path)
+            # K4: routing Azure → invoke subprocess en lugar de convert_path.
+            from capmd.cache import CleanerConfigSnapshot
+            from capmd.convert.azure import AzureRouting
+
+            # K6: cache lookup antes de markitdown/cleaners. Solo aplica
+            # al flujo built-in (Azure corre server-side, no vale la pena
+            # cachear). Si hay cache hit, restauramos el markdown body
+            # cacheado y saltamos subprocess + cleaners.
+            _cleaner_snapshot = CleanerConfigSnapshot(
+                enabled=tuple(_parse_clean_list(only_clean_str) or ()),
+                disabled=tuple(_parse_clean_list(skip_clean_str) or ()),
+                pipeline=(),
+            )
+            _page_range_str: str | None = None
+            if resolved_page_range is not None and hasattr(
+                resolved_page_range, "to_str"
+            ):
+                _page_range_str = resolved_page_range.to_str()
+            _pdf_bytes = (
+                path.read_bytes() if path and path.exists() else b""
+            )
+            (
+                _cache_active,
+                _cache_key,
+                _cache_dir,
+                _cache_hit_markdown,
+            ) = _init_cache_state(
+                cache_dir_override=cache_dir,
+                no_cache_flag=no_cache,
+                is_azure_flow=isinstance(azure_routing, AzureRouting)
+                and azure_routing.is_active,
+                pdf_bytes=_pdf_bytes,
+                page_range=_page_range_str,
+                cleaner_snapshot=_cleaner_snapshot,
+            )
+            if _cache_hit_markdown is not None:
+                assert _cache_key is not None  # para el type-checker
+                typer.echo(f"cache hit: {_cache_key[:8]}", err=True)
+
+            if _cache_hit_markdown is not None:
+                from capmd.models import ConversionOutput
+
+                # Cache hit: skip markitdown subprocess + cleaners. El
+                # `result.markdown` se reemplaza con el cached body.
+                result = ConversionOutput(
+                    markdown=_cache_hit_markdown,
+                    elapsed_seconds=0.0,
+                    page_count=None,
+                    size_bytes=None,
+                )
+            else:
+                active_azure: AzureRouting | None = None
+                if isinstance(azure_routing, AzureRouting) and azure_routing.is_active:
+                    active_azure = azure_routing
+                if active_azure is not None:
+                    result = engine.convert_path_via_azure(
+                        target_path, active_azure
+                    )
+                else:
+                    result = engine.convert_path(target_path)
             prog.stop(_t_conv)
 
         result_reported = result
@@ -1063,6 +1333,7 @@ def _run_convert_body(
                 only_clean=only_clean,
                 skip_clean=skip_clean,
                 ext=ext or "other",
+                skip_cleaners=_cache_hit_markdown is not None,
             )
         else:
             final_markdown, cleaner_stats = _apply_clean_pipeline(
@@ -1070,6 +1341,7 @@ def _run_convert_body(
                 no_clean=no_clean,
                 only_clean=only_clean,
                 skip_clean=skip_clean,
+                skip_cleaners=_cache_hit_markdown is not None,
                 target_path=target_path,
             )
         prog.advance(_t_clean)
@@ -1126,6 +1398,34 @@ def _run_convert_body(
         else:
             toc_md = final_markdown
 
+        # K2: aplicar perfil ``study`` solo al output a archivo. El
+        # cuerpo que va a stdout (``final_markdown``) NO se modifica
+        # (mismo contrato que ``--toc``: las pipes se mantienen limpias).
+        _study_fields: dict[str, Any] | None = None
+        if profile == "study" and (out_dir is not None or output is not None):
+            # Para preservar timestamps editados por el usuario en
+            # re-corridas, leemos el FM previo del archivo destino
+            # (si existe).
+            from capmd.study import apply_profile_study
+
+            existing_fm = _read_existing_study_fm(
+                output=output,
+                out_dir=out_dir,
+                flat=flat,
+                source_path=path if source != "-" else None,
+                stdin=source == "-",
+                resolved_chapter=resolved_chapter,
+                resolved_page_range=resolved_page_range,
+            )
+
+            toc_md, _study_fields = apply_profile_study(
+                markdown=toc_md,
+                cli_tags=cli_tags,
+                cli_status=cli_status,
+                cli_reset=reset_study,
+                existing_fm=existing_fm,
+            )
+
         if out_dir is not None or output is not None:
             file_markdown = _prepend_front_matter_for_file(
                 final_markdown=toc_md,
@@ -1136,6 +1436,11 @@ def _run_convert_body(
                 no_clean=no_clean,
                 only_clean=only_clean_str,
                 skip_clean=skip_clean_str,
+                skip_cleaners=_cache_hit_markdown is not None,
+                study_tags=_study_fields["tags"] if _study_fields else None,
+                study_reading_status=_study_fields["reading_status"] if _study_fields else None,
+                study_started_at=_study_fields["started_at"] if _study_fields else None,
+                study_finished_at=_study_fields["finished_at"] if _study_fields else None,
             )
             file_title = _resolve_file_title(
                 final_markdown=final_markdown,
@@ -1263,6 +1568,10 @@ def _run_convert_body(
                 warnings=run_warnings_msgs,
                 force=force,
                 suffix=suffix,
+                study_tags=_study_fields["tags"] if _study_fields else None,
+                reading_status=_study_fields["reading_status"] if _study_fields else None,
+                started_at=_study_fields["started_at"] if _study_fields else None,
+                finished_at=_study_fields["finished_at"] if _study_fields else None,
             )
             if paths is not None and not flat and split_normalized == "h2":
                 _write_split_sections(
@@ -1283,6 +1592,27 @@ def _run_convert_body(
                 if paths is not None and paths.markdown_path.exists()
                 else None
             )
+            # K3: hook post-conversión (solo si NO es flat; flat no
+            # tiene chapters dir ni capmd.json, el hook vería paths
+            # vacíos; lo dejamos skip para evitar semántica rara).
+            if paths is not None and not flat:
+                _maybe_run_post_command_hook(
+                    post_command=_cfg.post_command if _cfg is not None else None,
+                    post_command_timeout=(
+                        _cfg.post_command_timeout if _cfg is not None else None
+                    ),
+                    output_path=paths.markdown_path,
+                    capmd_json_path=paths.capmd_json_path,
+                    images_dir=paths.images_dir,
+                    book_slug=(
+                        paths.markdown_path.parent.parent.name
+                        if paths.markdown_path.parent.parent
+                        else ""
+                    ),
+                    chapter_slug=paths.markdown_path.parent.name,
+                    profile=profile,
+                    dry_run=dry_run,
+                )
             _maybe_open_after(open_after, open_cmd, final_md_path, source=source)
             _finalize_and_return(
                 raw_markdown=raw_markdown,
@@ -1303,6 +1633,8 @@ def _run_convert_body(
             return
 
         if output is None:
+            # Stdout: ``final_markdown`` (sin FM, sin TOC, sin study).
+            # El contrato de F2/F5 se mantiene: pipes limpias.
             typer.echo(final_markdown)
             prog.advance(_t_write)
             prog.stop(_t_write)
@@ -1328,8 +1660,19 @@ def _run_convert_body(
 
         from capmd.output.writer import resolve_destination_collision
 
+        # K6 cache hit: el cached file_markdown es byte-estable, así
+        # que es seguro sobrescribir el output sin pedir --force.
         output_resolved = resolve_destination_collision(
-            output, force=force, suffix=suffix, kind="file"
+            output,
+            # K6 cache hit: el cached body es byte-estable (mismo cache_key
+            # = mismo input bytes + page range + cleaner config =
+            # mismo markdown post-cleaners), así que sobrescribir el
+            # output es safe — los motores downstream (split K4, study
+            # K2, hooks K3) operan sobre el cached body que es
+            # semánticamente idéntico al de la 1ª corrida.
+            force=force or _cache_hit_markdown is not None,
+            suffix=suffix,
+            kind="file",
         )
         if output_resolved != output:
             _stderr.print(f"[dim]destino versionado: {output_resolved}[/dim]")
@@ -1337,6 +1680,69 @@ def _run_convert_body(
         logger.debug("escrito %d chars a %s", len(file_markdown), output_resolved)
         prog.advance(_t_write)
         prog.stop(_t_write)
+        # K3: hook post-conversión (single-file mode; sin capmd.json
+        # ni images/ en este modo).
+        from capmd.output.writer import (
+            book_slug_from as _book_slug_from,
+        )
+        from capmd.output.writer import (
+            chapter_slug_from as _chapter_slug_from,
+        )
+
+        _single_book = _book_slug_from(
+            _source_doc_for_slug(path if source != "-" else None),
+            stdin=source == "-",
+        )
+        _single_chapter = _chapter_slug_from(
+            chapter=resolved_chapter, page_range=resolved_page_range
+        )
+        # K6: cache save. Solo built-in flow (Azure se cachea
+        # server-side). Persistimos el body markdown para que la 2ª
+        # corrida con mismos args sea un cache hit.
+        if (
+            not _cache_hit_markdown
+            and _cache_active
+            and _cache_key is not None
+            and _cache_dir is not None
+            and output_resolved is not None
+        ):
+            try:
+                from capmd.cache import save_cache_entry
+
+                # Construir FM (mismo path que el flujo normal) para
+                # cachear la versión con FM embedded.
+                _fm_for_cache = (
+                    _parse_existing_fm_to_dict(file_markdown)
+                    if file_markdown.startswith("---")
+                    else {}
+                )
+                save_cache_entry(
+                    _cache_dir,
+                    _cache_key,
+                    markdown=toc_md,
+                    fm=_fm_for_cache,
+                    images=tuple(f.path for f in extracted_figures if f.path),
+                    capmd_version=capmd.__version__,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "K6 cache save falló (%s): el convert sigue OK",
+                    exc,
+                )
+
+        _maybe_run_post_command_hook(
+            post_command=_cfg.post_command if _cfg is not None else None,
+            post_command_timeout=(
+                _cfg.post_command_timeout if _cfg is not None else None
+            ),
+            output_path=output_resolved,
+            capmd_json_path=None,
+            images_dir=None,
+            book_slug=_single_book,
+            chapter_slug=_single_chapter,
+            profile=profile,
+            dry_run=dry_run,
+        )
         _maybe_open_after(open_after, open_cmd, output_resolved, source=source)
         _finalize_and_return(
             raw_markdown=raw_markdown,
@@ -1366,12 +1772,21 @@ def _prepend_front_matter_for_file(
     no_clean: bool,
     only_clean: str | None,
     skip_clean: str | None,
+    study_tags: tuple[str, ...] | None = None,
+    study_reading_status: str | None = None,
+    study_started_at: str | None = None,
+    study_finished_at: str | None = None,
+    skip_cleaners: bool = False,
 ) -> str:
     """Prepende el front matter YAML para cualquier salida a archivo (F2).
 
     Stdout no entra por acá (sale por otra rama). Centraliza el cálculo
     de slugs y campos para que ``--out`` (tree/flat) y ``-o FILE``
     compartan exactamente la misma metadata.
+
+    Los kwargs ``study_*`` son opcionales (K2). Si no se pasan o son
+    neutrales, NO se agrega la sub-key ``study:`` al FM (compat con FMs
+    pre-K2).
     """
     from capmd.errors import IOError as CapmdIOError
     from capmd.output.frontmatter import (
@@ -1431,6 +1846,10 @@ def _prepend_front_matter_for_file(
         capmd_version=_capmd_version(),
         cleaners_applied=_collect_cleaners_applied(no_clean, only_clean, skip_clean),
         markitdown_version=markitdown_version(),
+        study_tags=study_tags,
+        study_reading_status=study_reading_status,
+        study_started_at=study_started_at,
+        study_finished_at=study_finished_at,
     )
     return prepend_front_matter(final_markdown, fields)
 
@@ -1454,6 +1873,10 @@ def _write_output_tree_or_flat(
     warnings: tuple[str, ...] = (),
     force: bool = False,
     suffix: bool = False,
+    study_tags: tuple[str, ...] | None = None,
+    reading_status: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
 ) -> OutputPaths | None:
     """Rama de escritura para ``--out`` (F1 + F3 + F8).
 
@@ -1553,6 +1976,10 @@ def _write_output_tree_or_flat(
         figures=figures,
         elapsed_seconds=elapsed_seconds,
         warnings=warnings,
+        study_tags=study_tags,
+        reading_status=reading_status,
+        started_at=started_at,
+        finished_at=finished_at,
     )
     written = write_output_tree(
         paths, markdown=final_markdown, metadata=metadata, force=force
@@ -1813,6 +2240,203 @@ def _format_from_suffix(suffix: str) -> str:
     if s in {"pdf", "epub", "docx", "pptx", "xlsx"}:
         return s
     return "other"  # pragma: no cover
+
+
+def _read_existing_study_fm(
+    *,
+    output: Path | None,
+    out_dir: Path | None,
+    flat: bool,
+    source_path: Path | None,
+    stdin: bool,
+    resolved_chapter: Chapter | None,
+    resolved_page_range: PageRange | None,
+) -> dict[str, Any] | None:
+    """Lee el FM del archivo destino si existe, para preservar ``started_at``/``finished_at``.
+
+    K2: cuando ``--profile study`` se aplica sobre un archivo ya existente,
+    queremos que los timestamps que el usuario editó manualmente se
+    preserven. Esto solo aplica al output a disco (no a stdout).
+
+    Lee el archivo final ``out_dir/<book>/<chapter>/<chapter>.md`` (tree)
+    o ``out_dir/<book>.md`` (flat) o ``output`` (cuando se pasa ``-o FILE``).
+    Si el archivo no existe, devuelve ``None``.
+    """
+    from capmd.errors import IOError as _CapmdIOError
+    from capmd.output.frontmatter import parse_front_matter
+    from capmd.output.writer import (
+        book_slug_from as _book_slug_from,
+    )
+    from capmd.output.writer import (
+        chapter_slug_from as _chapter_slug_from,
+    )
+
+    target: Path | None = None
+    if output is not None and out_dir is None:
+        target = output
+    elif out_dir is not None:
+        if flat:
+            book = _book_slug_from(
+                _source_doc_for_slug(source_path) if source_path else None,
+                stdin=stdin,
+            )
+            target = out_dir / f"{book}.md"
+        else:
+            book = _book_slug_from(
+                _source_doc_for_slug(source_path) if source_path else None,
+                stdin=stdin,
+            )
+            chap = _chapter_slug_from(
+                chapter=resolved_chapter, page_range=resolved_page_range
+            )
+            target = out_dir / book / chap / f"{chap}.md"
+
+    if target is None or not target.is_file():
+        return None
+
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    try:
+        return parse_front_matter(text)
+    except _CapmdIOError:  # pragma: no cover
+        return None
+
+
+def _source_doc_for_slug(path: Path | None) -> SourceDoc | None:
+    """Construye un :class:`SourceDoc` mínimo solo para derivar el ``book_slug``.
+
+    Usado por K2 para preservar FM previo. Devuelve ``None`` si el path
+    no existe (caso ``stdin``).
+    """
+    if path is None or not path.exists() or not path.is_file():
+        return None
+    sha = _maybe_sha256_of(path) or "0" * 64
+    size = path.stat().st_size
+    fmt = _format_from_suffix(path.suffix)
+    return SourceDoc(
+        path=path,
+        format=cast(
+            "Literal['pdf', 'epub', 'docx', 'pptx', 'xlsx', 'other']", fmt
+        ),
+        sha256=sha,
+        size_bytes=size,
+    )
+
+
+def _init_cache_state(
+    *,
+    cache_dir_override: Path | None,
+    no_cache_flag: bool,
+    is_azure_flow: bool,
+    pdf_bytes: bytes,
+    page_range: str | None,
+    cleaner_snapshot: Any,
+) -> tuple[bool, str | None, Path | None, str | None]:
+    """Inicializa el estado del cache de conversión (K6) en un solo lugar.
+
+    Centraliza la lógica que antes vivía suelta en ``_run_convert_body``
+    (4 sentinels inicializados al top + un lookup inline). Devuelve una
+    4-tupla ``(active, key, dir, cached_markdown)`` donde ``active``
+    es True si el cache está habilitado y el flujo es built-in (no Azure);
+    ``key``/``dir`` son None si el cache no está activo; ``cached_markdown``
+    es el body cacheado si hay hit, None en miss.
+
+    Returns:
+        (active, cache_key, cache_dir, hit_markdown)
+    """
+    from capmd.cache import (
+        compute_cache_key,
+        get_cache_dir,
+        load_cache_entry,
+        should_use_cache,
+    )
+
+    active = should_use_cache(no_cache_flag=no_cache_flag) and not is_azure_flow
+    if not active:
+        return False, None, None, None
+
+    cache_dir = get_cache_dir(
+        override=str(cache_dir_override) if cache_dir_override else None
+    )
+    cache_key = compute_cache_key(
+        pdf_bytes=pdf_bytes,
+        page_range=page_range,
+        cleaner_snapshot=cleaner_snapshot,
+        capmd_version=capmd.__version__,
+    )
+    cached = load_cache_entry(cache_dir, cache_key)
+    hit_markdown: str | None = cached.markdown if cached is not None else None
+    return True, cache_key, cache_dir, hit_markdown
+
+
+def _maybe_run_post_command_hook(
+    *,
+    post_command: str | None,
+    post_command_timeout: float | None,
+    output_path: Path | None,
+    capmd_json_path: Path | None,
+    images_dir: Path | None,
+    book_slug: str,
+    chapter_slug: str,
+    profile: str | None,
+    dry_run: bool,
+) -> None:
+    """K3: invoca ``post_command`` después de un write exitoso.
+
+    No-op si:
+      - ``dry_run`` es True (mode plan-only).
+      - ``post_command`` es None o vacío.
+      - ``output_path`` es None (stdout, sin path a pasar).
+    """
+    if dry_run:
+        return
+    if not post_command or not post_command.strip():
+        return
+    if output_path is None:
+        return
+
+    from capmd.hooks import (
+        HOOK_TIMEOUT_DEFAULT,
+        HookContext,
+        hook_failed_message,
+        run_post_command,
+    )
+    from capmd.study import PROFILES
+
+    ctx = HookContext(
+        output_path=output_path,
+        capmd_json_path=capmd_json_path,
+        images_dir=images_dir,
+        book_slug=book_slug,
+        chapter_slug=chapter_slug,
+        profile=profile if profile in PROFILES else "",
+    )
+    timeout = (
+        post_command_timeout
+        if post_command_timeout is not None
+        else HOOK_TIMEOUT_DEFAULT
+    )
+    result = run_post_command(post_command, ctx, timeout=timeout)
+
+    if result.skipped:
+        return
+
+    msg = hook_failed_message(result)
+    if msg is not None:
+        _stderr.print(f"[yellow]warning:[/yellow] {msg}")
+        if result.stderr_tail:
+            _stderr.print(f"[dim]{result.stderr_tail}[/dim]")
+    logger.debug(
+        "hook %s: returncode=%s, took=%.2fs, stdout_tail=%r, stderr_tail=%r",
+        post_command,
+        result.returncode,
+        result.duration_seconds,
+        result.stdout_tail,
+        result.stderr_tail,
+    )
 
 
 def _book_title_from_pdf(path: Path) -> str:
@@ -2324,6 +2948,7 @@ def _run_cleaning_pipeline(
     no_clean: bool,
     only_clean: str | None,
     skip_clean: str | None,
+    skip_cleaners: bool = False,
 ) -> tuple[str, list[CleanerStat]]:
     """Aplica el pipeline de cleaners y devuelve ``(markdown, stats)``.
 
@@ -2332,8 +2957,10 @@ def _run_cleaning_pipeline(
     normal) y :func:`_apply_anchor` (flujo E4 con page markers).
 
     Con ``--no-clean`` retorna el input intacto y ``stats=[]``.
+    Con ``skip_cleaners=True`` (K6 cache hit) retorna el input intacto
+    (los cleaners ya corrieron cuando se cacheó el markdown).
     """
-    if no_clean:
+    if no_clean or skip_cleaners:
         return raw_markdown, []
 
     from capmd.clean.context import CleanContext
@@ -2359,6 +2986,10 @@ def _run_cleaning_pipeline(
         size_bytes=0,
     )
     ctx = CleanContext(source=source_doc, format=format_str)  # type: ignore[arg-type]
+    if skip_cleaners:
+        # K6 cache hit: raw_markdown ya viene cleaned (cacheada);
+        # no correr cleaners ni regenerar stats (preservar bytes).
+        return raw_markdown, []
     cleaned, stats = pipeline.run(raw_markdown, ctx)
     return cleaned, stats
 
@@ -2739,12 +3370,16 @@ def _apply_clean_pipeline(
     only_clean: str | None,
     skip_clean: str | None,
     target_path: Path,
+    skip_cleaners: bool = False,
 ) -> tuple[str, list[CleanerStat]]:
     """Aplica el pipeline de cleaners y devuelve ``(markdown, stats)``.
 
     ``--no-clean`` devuelve el input intacto y ``stats=[]``.
     ``--only-clean`` y ``--skip-clean`` filtran el pipeline por defecto.
     Construye un ``CleanContext`` mínimo a partir de la ruta de salida.
+
+    ``skip_cleaners=True`` (K6 cache hit) devuelve el input intacto
+    sin pasar por los cleaners — el cached body ya viene cleaned.
     """
     return _run_cleaning_pipeline(
         raw_markdown,
@@ -2752,6 +3387,7 @@ def _apply_clean_pipeline(
         no_clean=no_clean,
         only_clean=only_clean,
         skip_clean=skip_clean,
+        skip_cleaners=skip_cleaners,
     )
 
 
@@ -2762,9 +3398,10 @@ def _apply_clean_pipeline_to_stdin(
     only_clean: str | None,
     skip_clean: str | None,
     ext: str,
+    skip_cleaners: bool = False,
 ) -> tuple[str, list[CleanerStat]]:
     """Variante para stdin: usa un path placeholder en ``SourceDoc``."""
-    if no_clean:
+    if no_clean or skip_cleaners:
         return raw_markdown, []  # pragma: no cover
 
     from capmd.clean.context import CleanContext
@@ -3323,6 +3960,27 @@ def inspect(
     _ = quiet_effective
 
 
+def _parse_existing_fm_to_dict(file_markdown: str) -> dict[str, Any]:
+    """Extrae el FM YAML del markdown cacheado para guardarlo en el cache.
+
+    Si el markdown no arranca con ``---\\n``, devuelve dict vacío.
+    """
+    if not file_markdown.startswith("---"):
+        return {}
+    try:
+        import yaml
+
+        m = re.match(r"\A---\n(.*?)\n---\n", file_markdown, re.DOTALL)
+        if not m:
+            return {}
+        parsed = yaml.safe_load(m.group(1))
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    except Exception:
+        pass
+    return {}
+
+
 def _maybe_open_after(
     open_after: bool,
     open_cmd: str | None,
@@ -3634,3 +4292,106 @@ def setup_launch_agent(
             f"OK: LaunchAgent '{AGENT_LABEL}' descargado y removido.",
             err=False,
         )
+
+
+@app.command(name="compare")
+@_handle_capmd_errors
+def compare(
+    ctx: typer.Context,
+    source: Path = typer.Argument(  # noqa: B008
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help=(
+            "Archivo a comparar (PDF, EPUB, DOCX, PPTX, XLSX, etc.). "
+            "El comparador extrae Markdown con varios motores y muestra "
+            "métricas lado a lado."
+        ),
+    ),
+    pages: str | None = typer.Option(
+        None,
+        "--pages",
+        help=(
+            "Rango de páginas a comparar (ej: '45-50' o '1-3,7,10-12'). "
+            "Si se omite, se procesa todo el PDF."
+        ),
+    ),
+    timeout: int = typer.Option(
+        600,
+        "--timeout",
+        min=1,
+        help="Timeout por motor, en segundos. Default 600s.",
+    ),
+    format: str = typer.Option(
+        "table",
+        "--format",
+        help="Formato de output: 'table' (default Rich) o 'json'.",
+    ),
+    ocr_engine: str | None = typer.Option(
+        None,
+        "--ocr-engine",
+        help=(
+            "Motor OCR a usar: 'tesseract' o 'ocrmypdf'. Default: "
+            "auto-detect (todos los OCR disponibles en PATH)."
+        ),
+    ),
+) -> None:
+    """Compara motores de extracción lado a lado (K5).
+
+    Por defecto corre el motor built-in (markitdown local). Si las env
+    vars ``MARKITDOWN_DOCINTEL_ENDPOINT`` o ``MARKITDOWN_CU_ENDPOINT``
+    están configuradas, agrega automáticamente Doc Intel / Content
+    Understanding. Si ``tesseract`` o ``ocrmypdf`` están en PATH,
+    agrega motores OCR.
+
+    Imprime una tabla Rich con palabras, headings y tiempo por motor.
+    Con ``--format json`` emite JSON a stdout. Los motores que no
+    están disponibles aparecen como ``skipped`` en la tabla.
+    """
+    from capmd.compare import render_report, run_compare
+    from capmd.compare.motors import parse_pages_string
+
+    # Validación temprana de ``--format``.
+    if format not in ("table", "json"):
+        raise typer.BadParameter(
+            f"--format debe ser 'table' o 'json', recibido {format!r}"
+        )
+    if ocr_engine is not None and ocr_engine not in ("tesseract", "ocrmypdf"):
+        raise typer.BadParameter(
+            f"--ocr-engine debe ser 'tesseract' o 'ocrmypdf', recibido {ocr_engine!r}"
+        )
+
+    # Validación de ``--pages`` (regex estricta).
+    try:
+        parse_pages_string(pages)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    # Resolución del path: si el usuario pasó un relativo, resolver
+    # contra CWD (Typer ya hace esto con el Argument, pero el mensaje
+    # de error es más claro si lo hacemos explícito).
+    source_path = source.resolve()
+    if not source_path.exists() or not source_path.is_file():
+        raise typer.BadParameter(f"archivo no encontrado: {source}")
+
+    report = run_compare(
+        source=source_path,
+        pages=pages,
+        timeout=timeout,
+        requested_ocr_engine=ocr_engine,
+    )
+    output = render_report(report, format=format)
+    typer.echo(output)
+
+    # Exit code: 0 si al menos 1 motor completó ok. Solo falla (exit 8)
+    # si el usuario tenía 2+ motores realmente disponibles (status "ok"
+    # o "skipped" con binario detectable) y menos de 2 completaron ok.
+    # Si solo había 1 motor ok disponible y ese completa, exit 0
+    # (no hay forma de activar un segundo).
+    active_count = sum(
+        1 for m in report.motors if m.status in ("ok", "skipped")
+    )
+    ok_count = sum(1 for m in report.motors if m.status == "ok")
+    if active_count >= 2 and ok_count < 2:
+        raise typer.Exit(code=8)

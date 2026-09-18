@@ -75,9 +75,11 @@ class OutputPaths:
 class CapmdJsonV2:
     """Metadata completa de una corrida (schema_version=2, F3).
 
-    20 campos. Las listas nuevas (``cleaner_stats``, ``figures``,
-    ``warnings``) están **siempre presentes**, vacías si no hay datos,
-    para que el schema sea predecible para consumers.
+    20 campos base + 4 campos opcionales de ``study`` (K2). Las listas
+    (``cleaner_stats``, ``figures``, ``warnings``) están **siempre
+    presentes**, vacías si no hay datos. Los campos ``study_*`` se
+    omiten del JSON cuando todos están en su valor neutro (compat con
+    ``capmd.json`` pre-K2 + reduce ruido en corridas sin ``--profile study``).
     """
 
     book_slug: str
@@ -98,6 +100,10 @@ class CapmdJsonV2:
     figures: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
     cleaners_applied: tuple[str, ...] = field(default_factory=tuple)
+    study_tags: tuple[str, ...] = field(default_factory=tuple)
+    reading_status: str = "unread"
+    started_at: str | None = None
+    finished_at: str | None = None
 
     def __post_init__(self) -> None:
         if self.elapsed_seconds < 0:
@@ -135,7 +141,23 @@ class CapmdJsonV2:
             "title": self.title,
             "warnings": list(self.warnings),
         }
+        # K2: campos study opcionales. Solo se emiten si alguno diverge
+        # del neutro (compat con capmd.json pre-K2).
+        if _study_is_active(
+            self.study_tags, self.reading_status, self.started_at, self.finished_at
+        ):
+            d["finished_at"] = self.finished_at
+            d["reading_status"] = self.reading_status
+            d["started_at"] = self.started_at
+            d["study_tags"] = list(self.study_tags)
         return d
+
+
+def _study_is_active(
+    tags: tuple[str, ...], status: str, started: str | None, finished: str | None
+) -> bool:
+    """``True`` si los 4 campos study no son todos neutrales."""
+    return bool(tags) or status != "unread" or started is not None or finished is not None
 
 
 def _capmd_version() -> str:
@@ -535,6 +557,10 @@ def build_metadata(
     figures: tuple[Figure, ...] = (),
     elapsed_seconds: float = 0.0,
     warnings: tuple[str, ...] = (),
+    study_tags: tuple[str, ...] | None = None,
+    reading_status: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
     now: datetime | None = None,
 ) -> CapmdJsonV2:
     """Arma un :class:`CapmdJsonV2` (schema_version=2) con los timestamps correctos.
@@ -543,6 +569,10 @@ def build_metadata(
     ``extract_first_h1`` → ``Chapter.title`` → ``book_slug``). ``now``
     es inyectable (tests deterministas). ``cleaner_stats`` y
     ``figures`` siempre son tuplas (vacias si no hay datos).
+
+    Los kwargs ``study_*`` son opcionales (K2): si no se pasan o son
+    neutrales, NO se emiten en el JSON. Si alguno diverge del neutro,
+    se incluyen los 4 (mismo criterio que el front matter).
     """
     pages: tuple[int, ...] | None
     if page_range is not None:
@@ -572,6 +602,12 @@ def build_metadata(
         _figure_to_dict(fig, images_dir_relative) for fig in figures
     )
 
+    # Resolver los 4 campos study a valores neutrales si no se pasaron.
+    resolved_tags = study_tags if study_tags is not None else ()
+    resolved_status = reading_status if reading_status is not None else "unread"
+    resolved_started = started_at
+    resolved_finished = finished_at
+
     return CapmdJsonV2(
         book_slug=book_slug,
         chapter_slug=chapter_slug,
@@ -591,6 +627,10 @@ def build_metadata(
         figures=figure_dicts,
         warnings=warnings,
         cleaners_applied=cleaners_applied,
+        study_tags=tuple(resolved_tags),
+        reading_status=resolved_status,
+        started_at=resolved_started,
+        finished_at=resolved_finished,
     )
 
 

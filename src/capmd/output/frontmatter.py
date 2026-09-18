@@ -33,14 +33,26 @@ import yaml
 from capmd.output.writer import markitdown_version
 
 __all__ = [
+    "NEUTRAL_STUDY_KEYS",
     "build_front_matter_fields",
     "extract_first_h1",
     "front_matter_fields_from_capmd_json",
     "markitdown_version",
+    "parse_front_matter",
     "prepend_front_matter",
     "render_front_matter",
     "strip_existing_front_matter",
 ]
+
+
+_NEUTRAL_TAGS: tuple[str, ...] = ()
+_NEUTRAL_STATUS = "unread"
+
+NEUTRAL_STUDY_KEYS = (_NEUTRAL_TAGS, _NEUTRAL_STATUS, None, None)
+"""Tupla ``(tags, reading_status, started_at, finished_at)`` que
+representa el estado neutro del perfil study. Si ``build_front_matter_fields``
+recibe exactamente estos valores, omite la sub-key ``study:`` del
+dict resultante (compat con FMs pre-K2)."""
 
 
 _FRONTMATTER_OPENING = "---"
@@ -75,8 +87,8 @@ def extract_first_h1(markdown: str) -> str | None:
 def strip_existing_front_matter(markdown: str) -> str:
     """Quita un bloque front matter válido al inicio del markdown.
 
-    Un bloque válido arranca con ``---\\n``, sigue con claves YAML y
-    cierra con ``---\\n``. La búsqueda acepta (y consume) los
+    Un bloque válido arranca con ``---\n``, sigue con claves YAML y
+    cierra con ``---\n``. La búsqueda acepta (y consume) los
     newlines/blank line que separan el cierre del cuerpo. Si no hay
     bloque válido, devuelve el input intacto preservando cualquier
     whitespace inicial.
@@ -89,6 +101,43 @@ def strip_existing_front_matter(markdown: str) -> str:
         return markdown
     leading_ws = markdown[: len(markdown) - len(stripped)]
     return leading_ws + stripped[m.end():]
+
+
+def parse_front_matter(markdown: str) -> dict[str, Any] | None:
+    """Devuelve el dict YAML del front matter al inicio del markdown, o ``None``.
+
+    Equivalente inverso de :func:`render_front_matter`: extrae el
+    bloque ``---\\n...\\n---\\n`` inicial, lo parsea con
+    ``yaml.safe_load`` y devuelve el dict. Si no hay FM válido al
+    inicio, devuelve ``None`` (preservando ``strip_existing_front_matter``
+    como primitiva pura).
+
+    Útil para K2: cuando se re-corre ``--profile study`` sobre un
+    archivo existente, queremos leer el FM previo para preservar
+    ``started_at`` / ``finished_at`` editados por el usuario.
+    """
+    stripped = markdown.lstrip()
+    if not stripped.startswith(_FRONTMATTER_OPENING):
+        return None
+    m = _FRONTMATTER_LEADING_RE.match(stripped)
+    if m is None:
+        return None
+    # El match captura ``---\\n<yaml>\\n---\\n\\n`` y termina en el
+    # índice posterior al último newline. Extraemos el contenido
+    # YAML: arranca después de ``---\\n`` (offset 4) y termina justo
+    # antes del ``---`` de cierre. El cierre arranca en
+    # ``m.end() - len('---') - 2`` (el -2 cubre el ``\\n`` final
+    # extra que captura el regex ``\\n+``).
+    fm_text = stripped[
+        len(_FRONTMATTER_OPENING) + 1 : m.end() - len(_FRONTMATTER_OPENING) - 2
+    ]
+    try:
+        parsed = yaml.safe_load(fm_text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def render_front_matter(fields: dict[str, Any]) -> str:
@@ -119,8 +168,18 @@ def build_front_matter_fields(
     capmd_version: str,
     cleaners_applied: tuple[str, ...],
     markitdown_version: str | None = None,
+    study_tags: tuple[str, ...] | None = None,
+    study_reading_status: str | None = None,
+    study_started_at: str | None = None,
+    study_finished_at: str | None = None,
 ) -> dict[str, Any]:
-    """Arma el dict de las 10 claves del roadmap en el orden del schema."""
+    """Arma el dict de las 10 claves del roadmap en el orden del schema.
+
+    Si los kwargs ``study_*`` se pasan y alguno diverge del neutro,
+    agrega una sub-key ``study:`` con los 4 campos (K2). Si todos son
+    neutrales (o no se pasan), NO agrega la sub-key (compat con FMs
+    pre-K2).
+    """
     md_version = markitdown_version if markitdown_version is not None else _md_version()
     fields: dict[str, Any] = {
         "title": title,
@@ -134,7 +193,53 @@ def build_front_matter_fields(
         "markitdown_version": md_version,
         "cleaners_applied": list(cleaners_applied),
     }
+
+    # K2: sub-bloque study opcional. Solo se emite si hay data study
+    # (alguno de los 4 kwargs fue pasado y diverge del neutro).
+    study_block = _maybe_study_block(
+        tags=study_tags,
+        reading_status=study_reading_status,
+        started_at=study_started_at,
+        finished_at=study_finished_at,
+    )
+    if study_block is not None:
+        fields["study"] = study_block
+
     return fields
+
+
+def _maybe_study_block(
+    *,
+    tags: tuple[str, ...] | None,
+    reading_status: str | None,
+    started_at: str | None,
+    finished_at: str | None,
+) -> dict[str, Any] | None:
+    """Devuelve el sub-dict ``study`` si hay data no-neutra; ``None`` si no.
+
+    Detección: si los 4 kwargs vienen en su valor neutro
+    (``tags=()``, ``reading_status="unread"``, ``started_at=None``,
+    ``finished_at=None``) o no se pasan (``None``), no emite el bloque.
+    """
+    if tags is None and reading_status is None and started_at is None and finished_at is None:
+        return None
+    resolved_tags = tags if tags is not None else _NEUTRAL_TAGS
+    resolved_status = reading_status if reading_status is not None else _NEUTRAL_STATUS
+    resolved_started = started_at
+    resolved_finished = finished_at
+    if (
+        tuple(resolved_tags) == _NEUTRAL_TAGS
+        and resolved_status == _NEUTRAL_STATUS
+        and resolved_started is None
+        and resolved_finished is None
+    ):
+        return None
+    return {
+        "tags": list(resolved_tags),
+        "reading_status": resolved_status,
+        "started_at": resolved_started,
+        "finished_at": resolved_finished,
+    }
 
 
 def _md_version() -> str:
@@ -162,7 +267,9 @@ def front_matter_fields_from_capmd_json(json_dict: Mapping[str, Any]) -> dict[st
         markitdown_version  markitdown_version
         cleaners_applied    cleaners_applied
 
-    Valida que ``schema_version == 2``. ``KeyError`` si falta alguna key.
+    Si el JSON trae los campos opcionales de ``study`` (K2), también
+    los propaga como sub-dict ``study:``. Valida que
+    ``schema_version == 2``. ``KeyError`` si falta alguna key requerida.
     """
     if json_dict.get("schema_version") != 2:
         raise ValueError(
@@ -175,7 +282,7 @@ def front_matter_fields_from_capmd_json(json_dict: Mapping[str, Any]) -> dict[st
             f"capmd.json no tiene las keys necesarias para regenerar el FM: "
             f"{missing}"
         )
-    return {
+    fields: dict[str, Any] = {
         "title": json_dict["title"],
         "book": json_dict["book_slug"],
         "chapter": json_dict["chapter_slug"],
@@ -187,6 +294,23 @@ def front_matter_fields_from_capmd_json(json_dict: Mapping[str, Any]) -> dict[st
         "markitdown_version": json_dict["markitdown_version"],
         "cleaners_applied": tuple(json_dict["cleaners_applied"]),
     }
+
+    # K2: si el JSON trae los 4 campos opcionales de study y ALGUNO
+    # diverge del neutro, agregamos el sub-bloque ``study:``. Misma
+    # regla que ``build_front_matter_fields``. ``.get(k)`` devuelve
+    # ``None`` tanto si la key está ausente como si está presente con
+    # valor ``None``; ``tuple(... or ())`` normaliza lista-a-tupla y
+    # tolera ausentes/None.
+    study_block = _maybe_study_block(
+        tags=tuple(json_dict.get("study_tags") or ()),
+        reading_status=json_dict.get("reading_status"),
+        started_at=json_dict.get("started_at"),
+        finished_at=json_dict.get("finished_at"),
+    )
+    if study_block is not None:
+        fields["study"] = study_block
+
+    return fields
 
 
 def prepend_front_matter(markdown: str, fields: dict[str, Any]) -> str:

@@ -54,7 +54,7 @@ ImageFormat = Literal["png", "webp"]
 
 @dataclass(frozen=True)
 class BookProfile:
-    """Overrides por libro leídos de ``[books.\"<id>\"]``.
+    """Overrides por libro leídos de ``[books."<id>"]``.
 
     Cada campo es opcional: ``None`` = "sin override" (no pisa el valor
     resuelto en :class:`CapmdConfig`). El ``name`` es el id literal del
@@ -71,6 +71,11 @@ class BookProfile:
         image_overrides: subset de ``[images]`` por libro.
         title_pattern: regex source (compilable) para matching de
             ``--chapter``; ``None`` = sin override (usa substring).
+        tags: tags iniciales para ``--profile study`` (K2).
+        reading_status: ``reading_status`` inicial para ``--profile study``
+            (K2); ``None`` = sin override.
+        post_command: override per-libro del hook post-conversión (K3).
+        post_command_timeout: override per-libro del timeout del hook (K3).
     """
 
     name: str
@@ -81,6 +86,10 @@ class BookProfile:
     cleaners_disabled: tuple[str, ...] | None = None
     image_overrides: dict[str, Any] = field(default_factory=dict)
     title_pattern: str | None = None
+    tags: tuple[str, ...] | None = None
+    reading_status: str | None = None
+    post_command: str | None = None
+    post_command_timeout: float | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,10 @@ class CapmdConfig:
     books: dict[str, BookProfile] = field(default_factory=dict)
     source_paths: tuple[Path, ...] = ()
     sources: dict[str, str] = field(default_factory=dict)
+    book_tags: tuple[str, ...] | None = None
+    book_reading_status: str | None = None
+    post_command: str | None = None
+    post_command_timeout: float | None = None
 
 
 # Source-layer names used in CapmdConfig.sources.
@@ -287,6 +300,41 @@ def _build_config_from_dict(
     enabled, disabled = _cleaners_section_from(merged.get("cleaners"))
     sources: dict[str, str] = {}
 
+    # K3: [hooks] section (post_command, post_command_timeout).
+    post_command: str | None = None
+    post_command_timeout: float | None = None
+    hooks_section = merged.get("hooks")
+    if isinstance(hooks_section, dict):
+        pc_raw = hooks_section.get("post_command")
+        if pc_raw is not None:
+            if isinstance(pc_raw, str):
+                post_command = pc_raw
+            else:
+                logger.warning(
+                    "[hooks].post_command debe ser string; ignorado"
+                )
+        to_raw = hooks_section.get("post_command_timeout")
+        if to_raw is not None:
+            try:
+                timeout = float(to_raw)
+                if timeout < -1:
+                    logger.warning(
+                        "[hooks].post_command_timeout=%r debe ser >= -1; ignorado",
+                        to_raw,
+                    )
+                else:
+                    post_command_timeout = timeout
+            except (TypeError, ValueError):
+                logger.warning(
+                    "[hooks].post_command_timeout=%r no es float; ignorado", to_raw
+                )
+    sources["post_command"] = (
+        layer_name if post_command is not None else SRC_DEFAULT
+    )
+    sources["post_command_timeout"] = (
+        layer_name if post_command_timeout is not None else SRC_DEFAULT
+    )
+
     out_dir = _validate_out_dir(merged.get("out_dir", DEFAULTS["out_dir"]))
     sources["out_dir"] = layer_name if "out_dir" in merged else SRC_DEFAULT
 
@@ -326,6 +374,8 @@ def _build_config_from_dict(
         books=books if books is not None else {},
         source_paths=source_paths,
         sources=sources,
+        post_command=post_command,
+        post_command_timeout=post_command_timeout,
     )
 
 
@@ -345,6 +395,78 @@ def _validate_title_pattern(v: Any) -> str | None:
         logger.warning("title_pattern=%r inválido (%s); ignorado", v, exc)
         return None
     return v
+
+
+def _read_book_tags(name: str, raw: Any) -> tuple[str, ...] | None:
+    """Lee ``[books.<id>].tags`` (K2). Acepta lista de strings."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        logger.warning("[books.%s].tags debe ser lista de strings; ignorado", name)
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            logger.warning(
+                "[books.%s].tags contiene elemento no-string (%r); ignorado",
+                name,
+                item,
+            )
+            continue
+        out.append(item)
+    return tuple(out)
+
+
+def _read_book_reading_status(name: str, raw: Any) -> str | None:
+    """Lee ``[books.<id>].reading_status`` (K2). Valida contra el enum."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning(
+            "[books.%s].reading_status debe ser string; ignorado", name
+        )
+        return None
+    try:
+        # Import perezoso: evita ciclo si study.py importa config.
+        from capmd.study import validate_reading_status
+
+        return validate_reading_status(raw)
+    except ValueError:
+        logger.warning(
+            "[books.%s].reading_status=%r inválido; ignorado", name, raw
+        )
+        return None
+
+
+def _read_post_command(name: str, raw: Any) -> str | None:
+    """Lee ``[books.<id>].post_command`` (K3). Acepta string; vacío/None = sin override."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning(
+            "[books.%s].post_command debe ser string; ignorado", name
+        )
+        return None
+    return raw
+
+
+def _read_post_command_timeout(name: str, raw: Any) -> float | None:
+    """Lee ``[books.<id>].post_command_timeout`` (K3). Float >= -1 o None."""
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[books.%s].post_command_timeout=%r no es float; ignorado", name, raw
+        )
+        return None
+    if value < -1:
+        logger.warning(
+            "[books.%s].post_command_timeout=%r debe ser >= -1; ignorado", name, raw
+        )
+        return None
+    return value
 
 
 def _read_book_profile(name: str, table: dict[str, Any]) -> BookProfile | None:
@@ -383,6 +505,16 @@ def _read_book_profile(name: str, table: dict[str, Any]) -> BookProfile | None:
     image_overrides = _image_overrides_from(table)
     title_pattern = _validate_title_pattern(table.get("title_pattern"))
 
+    # K2: tags + reading_status por libro.
+    tags = _read_book_tags(name, table.get("tags"))
+    reading_status = _read_book_reading_status(name, table.get("reading_status"))
+
+    # K3: post_command + post_command_timeout por libro.
+    post_command = _read_post_command(name, table.get("post_command"))
+    post_command_timeout = _read_post_command_timeout(
+        name, table.get("post_command_timeout")
+    )
+
     # Si TODO es None, devolvemos None para no contaminar el registry.
     if (
         out_dir is None
@@ -392,6 +524,10 @@ def _read_book_profile(name: str, table: dict[str, Any]) -> BookProfile | None:
         and disabled is None
         and not image_overrides
         and title_pattern is None
+        and tags is None
+        and reading_status is None
+        and post_command is None
+        and post_command_timeout is None
     ):
         return None
 
@@ -404,6 +540,10 @@ def _read_book_profile(name: str, table: dict[str, Any]) -> BookProfile | None:
         cleaners_disabled=disabled,
         image_overrides=image_overrides,
         title_pattern=title_pattern,
+        tags=tags,
+        reading_status=reading_status,
+        post_command=post_command,
+        post_command_timeout=post_command_timeout,
     )
 
 
@@ -513,6 +653,16 @@ def apply_book_profile(cfg: CapmdConfig, profile: BookProfile) -> CapmdConfig:
         books=cfg.books,
         source_paths=cfg.source_paths,
         sources=new_sources,
+        post_command=(
+            profile.post_command
+            if profile.post_command is not None
+            else cfg.post_command
+        ),
+        post_command_timeout=(
+            profile.post_command_timeout
+            if profile.post_command_timeout is not None
+            else cfg.post_command_timeout
+        ),
     )
 
 
@@ -524,6 +674,16 @@ def _read_env(env: Mapping[str, str]) -> dict[str, Any]:
       dict devuelto simplemente no incluye esa clave).
     """
     out: dict[str, Any] = {}
+
+    # K4: endpoints de Azure (MARKITDOWN_*_ENDPOINT). Se mergean al
+    # final via cast porque mypy narrowea ``out`` heterogéneamente
+    # según la primera asignación (dict[str, str] o dict[str, int]).
+    _azure_endpoints: dict[str, str] = {}
+    for var in ("MARKITDOWN_DOCINTEL_ENDPOINT", "MARKITDOWN_CU_ENDPOINT"):
+        if var in env:
+            endpoint_value = env[var].strip()
+            if endpoint_value:
+                _azure_endpoints[var.lower()] = endpoint_value
 
     if "CAPMD_OUT_DIR" in env:
         out["out_dir"] = env["CAPMD_OUT_DIR"]
@@ -565,6 +725,30 @@ def _read_env(env: Mapping[str, str]) -> dict[str, Any]:
             cleaners[key] = _split_csv(env[var])
     if cleaners:
         out["cleaners"] = cleaners
+
+    # K3: CAPMD_HOOK_TIMEOUT env var (override del timeout del hook).
+    if "CAPMD_HOOK_TIMEOUT" in env:
+        raw_timeout = env["CAPMD_HOOK_TIMEOUT"].strip()
+        if raw_timeout:
+            try:
+                timeout = float(raw_timeout)
+                if timeout < -1:
+                    logger.warning(
+                        "CAPMD_HOOK_TIMEOUT=%r inválido (debe ser >= -1); ignorado",
+                        raw_timeout,
+                    )
+                else:
+                    out["post_command_timeout"] = timeout
+            except ValueError:
+                logger.warning(
+                    "CAPMD_HOOK_TIMEOUT=%r no es float; ignorado", raw_timeout
+                )
+
+    # K4: merge de los endpoints Azure. ``out`` ya tiene tipo
+    # ``dict[str, Any]`` en el return annotation; el cast explícito
+    # evita el colapso de mypy por las asignaciones heterogéneas.
+    for k, v in _azure_endpoints.items():
+        out[k] = v
 
     return out
 
@@ -650,6 +834,26 @@ def merge_configs(base: CapmdConfig, override: CapmdConfig) -> CapmdConfig:
             "image_overrides", SRC_DEFAULT
         )
 
+    new_post_command = (
+        override.post_command
+        if override.post_command is not None
+        else base.post_command
+    )
+    if override.post_command is not None:
+        new_sources["post_command"] = override.sources.get(
+            "post_command", SRC_DEFAULT
+        )
+
+    new_post_command_timeout = (
+        override.post_command_timeout
+        if override.post_command_timeout is not None
+        else base.post_command_timeout
+    )
+    if override.post_command_timeout is not None:
+        new_sources["post_command_timeout"] = override.sources.get(
+            "post_command_timeout", SRC_DEFAULT
+        )
+
     return CapmdConfig(
         out_dir=new_out_dir,
         image_format=new_image_format,
@@ -660,6 +864,8 @@ def merge_configs(base: CapmdConfig, override: CapmdConfig) -> CapmdConfig:
         books=base.books,
         source_paths=base.source_paths + override.source_paths,
         sources=new_sources,
+        post_command=new_post_command,
+        post_command_timeout=new_post_command_timeout,
     )
 
 
@@ -787,6 +993,45 @@ def load_config(
         else SRC_DEFAULT
     )
 
+    # K3: [hooks] section (post_command, post_command_timeout).
+    post_command: str | None = None
+    post_command_timeout: float | None = None
+    hooks_section = merged.get("hooks")
+    if isinstance(hooks_section, dict):
+        pc_raw = hooks_section.get("post_command")
+        if pc_raw is not None:
+            if isinstance(pc_raw, str):
+                post_command = pc_raw
+            else:
+                logger.warning(
+                    "[hooks].post_command debe ser string; ignorado"
+                )
+        to_raw = hooks_section.get("post_command_timeout")
+        if to_raw is not None:
+            try:
+                timeout = float(to_raw)
+                if timeout < -1:
+                    logger.warning(
+                        "[hooks].post_command_timeout=%r debe ser >= -1; ignorado",
+                        to_raw,
+                    )
+                else:
+                    post_command_timeout = timeout
+            except (TypeError, ValueError):
+                logger.warning(
+                    "[hooks].post_command_timeout=%r no es float; ignorado", to_raw
+                )
+    sources["post_command"] = (
+        _detect_layer_name_for_key("post_command", toml_layers)
+        if post_command is not None
+        else SRC_DEFAULT
+    )
+    sources["post_command_timeout"] = (
+        _detect_layer_name_for_key("post_command_timeout", toml_layers)
+        if post_command_timeout is not None
+        else SRC_DEFAULT
+    )
+
     base = CapmdConfig(
         out_dir=out_dir,
         image_format=image_format,
@@ -797,6 +1042,8 @@ def load_config(
         books=books,
         source_paths=tuple(toml_sources),
         sources=sources,
+        post_command=post_command,
+        post_command_timeout=post_command_timeout,
     )
 
     env_merged = _read_env(env)
@@ -828,6 +1075,13 @@ def load_config(
     )
     # image_overrides from env: not exposed in current schema (TOML only).
     env_sources["image_overrides"] = SRC_DEFAULT
+    # K3: post_command siempre viene del TOML (no env); el timeout
+    # sí puede venir de CAPMD_HOOK_TIMEOUT.
+    env_sources["post_command"] = SRC_DEFAULT
+    if "post_command_timeout" in env_merged:
+        env_sources["post_command_timeout"] = SRC_ENV
+    else:
+        env_sources["post_command_timeout"] = SRC_DEFAULT
 
     env_enabled, env_disabled = _cleaners_section_from(cleaners_section_env)
     env_cfg = CapmdConfig(
@@ -844,6 +1098,8 @@ def load_config(
         books=base.books,
         source_paths=(),
         sources=env_sources,
+        post_command=None,  # K3: post_command solo viene de TOML.
+        post_command_timeout=env_merged.get("post_command_timeout"),
     )
     return merge_configs(base, env_cfg)
 
