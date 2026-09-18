@@ -17,7 +17,18 @@ def _normal_pdf(tmp_path: Path) -> Path:
 
 
 def _convert(args: list[str]) -> object:
-    return CliRunner().invoke(app, ["convert", *args])
+    # Aislar HOME para que el cache K6 no contamine tests (default usa
+    # ``$XDG_CACHE_HOME`` o ``~/.cache/capmd/convert/`` que es global).
+    import os
+    import tempfile
+
+    from typer.testing import CliRunner
+
+    tmp = tempfile.mkdtemp(prefix="capmd-f8-")
+    env = dict(os.environ)
+    env["HOME"] = tmp
+    env["XDG_CACHE_HOME"] = tmp
+    return CliRunner().invoke(app, ["convert", *args], env=env)
 
 
 # --- Literal test del roadmap F8 ------------------------------------------
