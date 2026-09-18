@@ -789,29 +789,257 @@ Out of scope explicito (no se hace en J5):
 
 ### Bloque K — Extensiones
 
-**K1. Plugin propio de markitdown**
+**✅ K1. Plugin propio de markitdown**
 Empaquetar los cleaners como plugin `#markitdown-plugin` para que también funcionen con el `markitdown` oficial.
 *Test:* `markitdown --list-plugins` lo muestra y `--use-plugins` aplica la limpieza.
 
-**K2. Salida para pipeline de estudio**
+Implementado en `src/capmd/markitdown_plugin.py:1`. API pública: `CleanersMarkItDownPlugin` (clase con classmethod `register_converters(markitdown_instance, **kwargs)` que se invoca sobre la clase — markitdown llama `entry_point.load()` y obtiene la clase directamente, no una instancia), `MarkdownCleanerConverter(DocumentConverter)` con `accepts` para extensiones `.md`/`.markdown`/`.mkd`/`.mkdn` y mimetypes `text/markdown`/`text/x-markdown` (devuelve False para todo lo demás para no robarle el flujo a los converters built-in de PDF/DOCX/etc), y `PLUGIN_NAME = "capmd-cleaners"`. El converter corre `capmd.clean.default_pipeline()` (los 11 cleaners D en orden) sobre el texto decodificado del stream (`utf-8` con `errors="replace"`), construyendo un `CleanContext` mínimo sintético (`SourceDoc` con sha256 zero, `format="other"`, sin `page_font_sizes`/`page_range` — los cleaners que dependen de fuentes de PDF degradan limpio cuando son `None`). Registro vía entry-point group `markitdown.plugin` declarado en `pyproject.toml:62-64` (mismo wheel, sin paquetes nuevos): `[project.entry-points."markitdown.plugin"] capmd-cleaners = "capmd.markitdown_plugin:CleanersMarkItDownPlugin"`. Priority = `10.0` (mismo nivel que `PRIORITY_GENERIC_FILE_FORMAT` de markitdown: los específicos built-in con priority 0 se prueban primero, después el plugin en el pool genérico).
+
+Tests (16/16 verdes en `tests/test_markitdown_plugin_discovery.py:1` + `tests/test_markitdown_plugin_apply.py:1`):
+
+- **Discovery** (6): entry-point registrado bajo `markitdown.plugin` con valor correcto, metadatos del plugin (`name`/`version=capmd.__version__`/`enabled`/`description`), `register_converters` definido como classmethod, registro en una instancia real de `MarkItDown` agrega el converter al pool, subprocess `markitdown --list-plugins` muestra la línea exacta `* capmd-cleaners   (package: capmd.markitdown_plugin:CleanersMarkItDownPlugin)` (regex anclada al formato), módulo importable externamente.
+- **Apply** (10): `accepts` true para las 4 extensiones y los 2 mimetypes, false para `.pdf`/`.docx`/`.html`/sin-info, `convert` aplica el pipeline y produce el mismo output que `default_pipeline().run(dirty, ctx)` (byte-equal directo sobre el converter; para e2e se compara contra el output post-normalizado por markitdown — `MarkItDown._convert` líneas 641-644 hace `line.rstrip()` + colapsa `\n{3,}` → `\n\n` — así que `_expected_cleaned()` re-aplica esa normalización antes de comparar), maneja input vacío, acepta streams `str` (no solo bytes), no rompe con input ya limpio, subprocess end-to-end `markitdown file.md --use-plugins -o out.md` produce el output esperado, flujo en dos pasadas (`.md → .md --use-plugins`) mantiene la limpieza, idempotencia estructural (headings y texto clave sobreviven al re-run).
+
+Workflow documentado en `README.md` ("Plugin para el MarkItDown oficial"). Caveat documentado: el plugin corre con `default_pipeline()` siempre — sin leer TOML ni env vars — porque vive fuera del CLI de capmd; para `--only-clean`/`--skip-clean`/perfiles por libro usar `capmd convert`.
+
+**✅ K2. Salida para pipeline de estudio**
 `--profile study`: front matter extra (tags, estado de lectura), secciones vacías `## Resumen` / `## Conceptos clave` / `## Dudas` listas para llenar.
 *Test:* el output encaja directo en tu carpeta de documentación de libros.
 
-**K3. Hook post-conversión**
+Implementado en `src/capmd/study.py:1` (~230 líneas). API pública: `apply_profile_study(markdown, *, cli_tags, cli_status, cli_reset, existing_fm, now) -> (markdown, fields_resueltos)`, `merge_study_fields(...)`, `study_sections_block()` (devuelve literal `"## Resumen\n\n## Conceptos clave\n\n## Dudas"`, mismo formato que README:626), `validate_reading_status(value)` (enum cerrado `unread`/`in_progress`/`read`), `PROFILES = ("study",)` registry extensible, `READING_STATUSES`, `DEFAULT_READING_STATUS`, `DEFAULT_TAGS`, `neutral_study_values()`. La mutación: appendea las 3 secciones vacías al final del cuerpo y, si había FM previo, re-renderiza con sub-key `study:` (tags/reading_status/started_at/finished_at). Si los 4 campos son neutrales (o no se pasó `--profile study`), NO emite la sub-key — compat con FMs pre-K2. El módulo NO se importa desde el plugin K1 (markitdown) ni desde los cleaners — solo lo usa la CLI.
+
+Extensiones a módulos existentes:
+
+- `src/capmd/output/frontmatter.py:53-72` — `_FM_REQUIRED_KEYS` se queda en 10 (sin bump de schema). `build_front_matter_fields(...)` agrega 4 kwargs opcionales `study_tags`/`study_reading_status`/`study_started_at`/`study_finished_at`; helper interno `_maybe_study_block(...)` decide si emitir el sub-dict `study:` (None si todos los kwargs son None o neutrales). `front_matter_fields_from_capmd_json(...)` propaga los 4 campos opcionales del capmd.json al FM regenerado, misma lógica de omitir si neutrales. Nuevo `parse_front_matter(markdown) -> dict | None` extrae el FM al inicio vía `yaml.safe_load` (usado por K2 para preservar timestamps editados por el usuario en re-corridas).
+- `src/capmd/output/writer.py:74-167` — `CapmdJsonV2` extiende con 4 campos opcionales (`study_tags`, `reading_status`, `started_at`, `finished_at`) con defaults neutrales. `_as_dict()` los incluye solo si alguno diverge del neutro (helper `_study_is_active(...)`); el `schema_version` sigue siendo `2`. `build_metadata(...)` acepta los 4 kwargs nuevos y los propaga al `CapmdJsonV2`. Sin bump de schema (compat con `capmd.json` v2 pre-K2).
+- `src/capmd/config.py:55-86` — `BookProfile` dataclass extiende con `tags: tuple[str, ...] | None = None` y `reading_status: str | None = None`. `_read_book_profile(...)` parsea ambos: tags acepta listas de strings (elementos no-string → warning + drop), `reading_status` se valida con `study.validate_reading_status()` (inválido → warning + ignore). `apply_book_profile(...)` los propaga a la `CapmdConfig` resultante (con label `book:<id>` en `sources`). Sin cambios en `merge_configs` (los campos viven solo en TOML, no se propagan por env vars — mismo patrón que `cleaners_enabled`).
+- `src/capmd/cli.py:622-647` — 4 flags nuevas en `convert`: `--profile <study>`, `--tag <X>` (repetible), `--reading-status <unread|in_progress|read>`, `--reset-study`. Validación temprana con `typer.BadParameter` (profile desconocido, reading_status inválido). Helper `_read_existing_study_fm(...)` (~50 líneas) reconstruye el path destino (tree/flat/-o FILE) y lee el FM previo si existe para preservar timestamps. Resolver de precedencia: CLI > book profile > neutral; si no se pasa CLI ni book profile, defaults. La mutación del cuerpo se aplica SOLO al output a archivo (`out_dir is not None or output is not None`); stdout mantiene el contrato de pipes limpias (mismo que `--toc`). Helper `_source_doc_for_slug(...)` para derivar el `book_slug` desde el path. `_run_convert_body` extiende con 3 kwargs (`profile`, `cli_tags`, `cli_status`, `reset_study`); `_prepend_front_matter_for_file` y `_write_output_tree_or_flat` propagan los 4 campos al FM y al `capmd.json`. Cuando `convert()` se invoca directamente desde tests (sin pasar kwargs nuevos), los sentinels `typer.Option` se filtran con `isinstance(x, str)` para no triggerear BadParameter.
+
+Documentación en `README.md`: nueva sub-sección "Perfiles de output (K2)" con la tabla de flags, ejemplo end-to-end con `--tag rust --tag ownership --reading-status in_progress`, muestra del YAML resultante con sub-bloque `study:`, y nota sobre el TOML `[books.<id>]` para defaults por libro. El comentario corto pre-existente en "Formato de salida" sigue ahí como resumen y enlaza a la nueva sección.
+
+Tests (45 nuevos: 30 unit + 15 CLI, 100% verdes):
+
+- **Unit (`tests/test_study_unit.py:1`)**: `validate_reading_status` acepta los 3 valores válidos y rechaza cualquier otro con mensaje que lista los válidos; `study_sections_block` matchea regex exacta del formato README; `merge_study_fields` cubre precedencia CLI > existing > default, dedup preservando orden de tags, auto-set de `started_at` cuando CLI pide `in_progress` y existing era null, preservación cuando existing no-null, idem para `finished_at`/`read`, `--reset-study` limpia ambos timestamps, default neutro sin inputs; `apply_profile_study` appendea las 3 secciones al final, devuelve los 4 campos resueltos, omite la sub-key `study:` cuando neutral, preserva `started_at` editado en re-corrida, appendea secciones sin envolver nada en YAML cuando no había FM previo; round-trip YAML del sub-bloque `study:` via `render_front_matter` + `yaml.safe_load`; `parse_front_matter` round-trip + casos negativos (sin FM, vacío, whitespace-only); `front_matter_fields_from_capmd_json` con y sin study en el JSON; `prepend_front_matter` preserva sub-key; `CapmdJsonV2._as_dict()` omite los 4 campos cuando neutrales y los incluye cuando activos; `build_metadata` round-trip con study kwargs; `neutral_study_values` matches defaults; `PROFILES` contiene `study`.
+- **CLI (`tests/test_study_cli.py:1`)**: `capmd convert --profile study -o out.md` appendea las 3 secciones al final del cuerpo y las pone en el body (no en el FM); sin `--profile study` NO aparecen las secciones; `--profile bogus` sale con exit ≠ 0; `--reading-status done` sale con exit ≠ 0 y mensaje claro; `--profile study --tag X --tag Y` produce `study.tags == [X, Y]`; `--reading-status in_progress` setea `started_at`; `--reading-status read` setea `finished_at` (started_at queda null); `--reset-study` fuerza ambos timestamps a null; sin `--profile study` el FM NO tiene key `study`; `--tag rust --tag ownership --tag rust` se deduplica; `--profile study` con `--out` hace que `capmd.json` incluya los 4 campos study no-neutrales; sin `--profile study` el JSON no incluye esos campos; 2ª corrida preserva `started_at` editado a mano en el archivo (no se sobrescribe con `--force`); stdout sin `-o` NO incluye secciones study ni FM (contrato pipes limpias); `capmd convert --help` lista `--profile`/`--tag`/`--reading-status`/`--reset-study`; `--profile study --split h2` appendea las secciones study al root `.md` (no a `sections/0N-*.md`).
+
+**Validación:**
+- Literal roadmap test: `capmd convert book.pdf --profile study --tag rust --tag ownership --reading-status in_progress -o /tmp/k2-verify.md` produce FM con sub-bloque `study: tags: [rust, ownership] / reading_status: in_progress / started_at: <now>` y body que termina con `## Resumen / ## Conceptos clave / ## Dudas`.
+- Lint: `ruff check` limpio sobre los 7 archivos tocados.
+- Tipos: `mypy` limpio.
+- Suite completa sin regresiones introducidas por K2: 1846 passed, 11 pre-existing flakes (test_config_g*/test_engine/test_images_describe pasan en aislamiento, fallan por env-var pollution de tests previos; mismo set que en K1).
+
+Caveat documentado: el perfil `study` se aplica solo al output a archivo (no a stdout), por consistencia con `--toc` que tampoco toca pipes. Para control fino sobre timestamps (`--reset-study`), el usuario necesita una corrida posterior sobre el archivo existente (con `--force` o `--suffix` si el destino ya estaba). Sin flag para editar timestamps en-place (no es scope: el workflow es "convertís y editás a mano").
+
+**✅ K3. Hook post-conversión**
 `post_command` en config: comando arbitrario que recibe la ruta del `.md` generado (para encadenar con tus otras herramientas — resumen, export, indexado).
 *Test:* el hook recibe la ruta correcta y su fallo se reporta sin corromper la salida.
 
-**K4. Soporte Azure Doc Intelligence / Content Understanding**
+Implementado en `src/capmd/hooks.py:1` (~250 líneas). API pública: `run_post_command(command, ctx, *, timeout=60.0) -> HookResult` con dataclasses frozen `HookContext(output_path, capmd_json_path, images_dir, book_slug, chapter_slug, profile)` y `HookResult(command, returncode, stdout_tail, stderr_tail, duration_seconds, timed_out, skipped)`. Constantes exportadas: `HOOK_TIMEOUT_DEFAULT=60.0`, `HOOK_OUTPUT_TAIL_LINES=20`, y 7 nombres de env vars (`CAPMD_OUTPUT_PATH`, `CAPMD_CAPMD_JSON_PATH`, `CAPMD_IMAGES_DIR`, `CAPMD_BOOK_SLUG`, `CAPMD_CHAPTER_SLUG`, `CAPMD_PROFILE`, `CAPMD_VERSION`). El runner usa `shlex.split(command) + [md_path]` con `subprocess.run(shell=False, env={**os.environ, **CAPMD_*}, timeout=..., capture_output=True, text=True)`. Sin `shell=True` para que la ruta no sea interpretada como shell. `command=None`/vacío → `HookResult(skipped=True)` sin subprocess. `shlex.ValueError`, `FileNotFoundError`, `OSError`, `subprocess.TimeoutExpired` y exit code != 0 se capturan sin raise; `HookResult.returncode=-1` o `timed_out=True`. Stdout/stderr se truncan a las últimas 20 líneas via `_truncate` para no explotar logs largos. `hook_failed_message(result)` devuelve string listo para warning a stderr, `None` si OK/skipped.
+
+Extensiones a módulos existentes:
+
+- `src/capmd/config.py:101-110` — nuevo `HookConfig` dataclass (frozen) con `post_command` y `post_command_timeout`. `BookProfile` (línea 153-154) extiende con los mismos 2 campos (override per-libro).
+- `src/capmd/config.py:300-336` — nuevo helper `_parse_hooks_section(merged_dict) -> (post_command, post_command_timeout)`: tipos inválidos caen a `None` con warning; timeout inválido (<-1 o no-float) idem.
+- `src/capmd/config.py:340-348` — `_build_config_from_dict` (single-layer builder) parsea `[hooks]` y emite `sources["post_command"]`/`sources["post_command_timeout"]` con la label correcta.
+- `src/capmd/config.py:387-396, 425-441, 461-471, 498-501, 545-575, 645-700` — `_read_book_profile` parsea `[books.<id>].post_command` y `post_command_timeout` (con `_read_post_command`/`_read_post_command_timeout`); `apply_book_profile` los propaga con label `book:<id>`. Validación de `reading_status` (K2) se mantiene.
+- `src/capmd/config.py:175` — `ENV_VARS` extendido con `CAPMD_HOOK_TIMEOUT`.
+- `src/capmd/config.py:755-775` — `_read_env` parsea `CAPMD_HOOK_TIMEOUT` (float; -1 = sin timeout; inválido → warning + ignore).
+- `src/capmd/config.py:1029-1086` — `load_config` invoca `_parse_hooks_section(merged.get("hooks"))` y luego `_set_hooks_on_config(base, post_command, post_command_timeout)` (helper frozen via `dataclasses.replace`) para mergear con el global TOML; env_cfg toma `post_command_timeout` desde `CAPMD_HOOK_TIMEOUT` (pero NO `post_command`, que solo vive en TOML).
+- `src/capmd/config.py:141, 152-154` — `CapmdConfig` extiende con `post_command` y `post_command_timeout` (defaults neutrales).
+- `src/capmd/config.py:850-886` — `merge_configs` propaga los 2 nuevos campos con la misma semántica `None` = sin override.
+- `src/capmd/cli.py:1414-1431, 1488-1521` — 2 nuevas llamadas a `_maybe_run_post_command_hook(...)` (helper definido en línea 2098): una en el branch `--out` (tree/flat), otra en el branch `-o FILE`. Pasa `_cfg.post_command`/`post_command_timeout` resueltos (book profile override ya aplicado). Helper imprime warning rich a stderr si el hook falla (no raise). Skip conditions documentadas: `dry_run`, `output_path is None` (stdout), `post_command is None/empty`. Para `--split h2` solo dispara el fire con el path al root `.md`, NO por cada `sections/0N-*.md`.
+- `src/capmd/cli.py:906-961` — `_run_convert_body` extiende con 3 kwargs nuevos (`profile`, `cli_tags`, `cli_status` pre-existentes de K2; `reset_study` también). Sin cambios de signature breaking.
+
+Tests (30 nuevos: 19 unit + 11 CLI, 100% verdes):
+
+- **Unit (`tests/test_hooks_unit.py:1`)**: skip cuando `command` es None o vacío/whitespace (3 tests); `accepts`/output del converter (5 tests para exts/mimetypes/empty/str-stream/no-op-on-clean); failure handling sin raise (3 tests para non-zero exit, timeout, command-not-found); truncación stdout/stderr (2 tests con 100 líneas vs 3 líneas); env vars (3 tests para inherit de OS, override de CAPMD_*, empty para opcional paths); dataclass inmutabilidad + `succeeded` property + timeout -1 desactiva (3 tests); validación `HOOK_TIMEOUT_DEFAULT == 60`; presencia de `study` en `PROFILES` registry.
+- **CLI (`tests/test_hooks_cli.py:1`)**: el hook fires después de write exitoso y el script recibe el path correcto (1); env vars `CAPMD_OUTPUT_PATH`/`CAPMD_BOOK_SLUG`/`CAPMD_PROFILE`/`CAPMD_VERSION` seteadas (1); failure no corruppe la salida (warning visible, exit 0, .md escrito) (1); command-not-found tampoco la rompe (1); hook NO se invoca en stdout (1); NI en `--dry-run` (1); NI sin `[hooks]` config (1); `--split h2` dispara UN solo fire (no por sección) (1); tree mode expone `CAPMD_CAPMD_JSON_PATH`/`CAPMD_IMAGES_DIR` apuntando a paths correctos (1); `[books.<id>].post_command` gana sobre `[hooks].post_command` (1); `[hooks].post_command_timeout` configurable (1).
+
+**Validación:**
+
+- Literal roadmap test (éxito): `capmd convert book.pdf -o out.md` con `~/.config/capmd/config.toml` con `[hooks].post_command = "/tmp/k3-verify-hook.sh"` → hook fires una vez, `out.md` escrito, `/tmp/k3-verify-log.txt` contiene `HOOK_CALLED: /tmp/.../out.md`. `capmd convert` sale exit 0.
+- Literal roadmap test (fallo): hook que devuelve `exit 1` → `capmd convert` sale exit 0, .md escrito, warning "hook exited with code 1" visible en stderr, NO raise.
+- Lint: `ruff check` limpio sobre los 7 archivos tocados.
+- Tipos: `mypy` limpio.
+- Suite completa: **1876 passed, 11 pre-existing flakes** (test_config_g*/test_engine/test_images_describe — pasan en aislamiento, fallan por env-var pollution de tests previos; mismo set de flakes que en K1/K2; no introducidos por K3).
+
+Caveats documentados: el plugin **no** modifica el body del `.md` (eso es `capmd convert --profile study` / K2). El hook corre siempre que haya un write a disco — si el usuario quiere invocar un hook por capítulo en tree mode con `--split h2`, queda cubierto: una corrida = un fire con el path al root. Flat mode también fire una vez con el path al flat file. Para encadenar varios comandos usar un script wrapper que llame a varios binarios. Sin flag CLI de override one-off — si necesitás un hook distinto para una corrida, usá `--config-file` apuntando a un TOML temporal.
+
+**✅ K4. Soporte Azure Doc Intelligence / Content Understanding**
 Exponer `--use-cu` y `-d`/`-e` como passthrough para PDFs escaneados o con layout complejo, leyendo `MARKITDOWN_CU_ENDPOINT` / `MARKITDOWN_DOCINTEL_ENDPOINT`.
 *Test:* con endpoint mockeado, la ruta CU se elige y el resto del pipeline no cambia.
 
-**K5. Comparador de motores**
+Implementado en `src/capmd/convert/azure.py:1` (~330 líneas). API pública: `AzureRouting` (dataclass frozen con `use_cu`, `use_docintel`, `docintel_endpoint`, `cu_endpoint`, `cu_analyzer`, `cu_file_types`, `timeout_seconds` + property `is_active`), `resolve_azure_routing(cli_use_cu, cli_use_docintel, cli_docintel_endpoint, cli_cu_endpoint, cli_cu_analyzer, cli_cu_file_types, timeout_seconds, env) -> AzureRouting`, `build_markitdown_argv(input, output, routing) -> list[str]`, `run_markitdown_subprocess(input, output, routing, *, markitdown_bin, extra_env) -> str` (devuelve el argv ejecutado; captura sin raise `AzureBackendMissing` si `markitdown` no está en PATH, `AzureConversionFailed` si exit != 0 o timeout). Constantes: `AZURE_TIMEOUT_DEFAULT=600.0`, `AZURE_STDERR_TAIL_LINES=20`. El runner usa `shlex.split(command) + [md_path]` con `subprocess.run(shell=False, env={**os.environ (filtrando CAPMD_* excepto CAPMD_MARKITDOWN_BIN), **CAPMD_MARKITDOWN_BIN si está}, timeout=..., capture_output=True, text=True)` para que la ruta no sea shell-interpretada.
+
+**Decisiones documentadas en el plan:**
+- *Routing solo con flag CLI explícito.* Las env vars `MARKITDOWN_DOCINTEL_ENDPOINT`/`MARKITDOWN_CU_ENDPOINT` proveen endpoints pero NO activan el routing sin `--use-cu`/`-d` (evita llamadas accidentales a la API).
+- *CU gana sobre DocIntel* si ambos están activos simultáneamente.
+- *Subprocess strategy:* como `MarkItDown()` Python no expone `use_cu`/`-docintel_endpoint` como constructor params (vive solo en el CLI), capmd spawnea `markitdown` CLI a un tmpfile y procesa el output por el mismo pipeline (cleaners, FM, images, hooks, study, split).
+
+Extensiones a módulos existentes:
+
+- `src/capmd/errors.py:55-77` — nuevas excepciones `AzureBackendMissing` (exit 3, hint `pip install 'markitdown[docintel,cu]'`) y `AzureConversionFailed` (exit 5, hint del stderr de markitdown truncado a 20 líneas).
+- `src/capmd/convert/engine.py:209-280` — nuevo método `Engine.convert_path_via_azure(path, routing)` que respeta los mismos size/page limits que `convert_path`, spawnea markitdown en un `tempfile.TemporaryDirectory()`, y devuelve el mismo `ConversionOutput`. El método `build_azure_argv` (línea 410) acepta `search_path` opcional para tests que inyectan un binario markitdown específico (vía env var `CAPMD_MARKITDOWN_BIN`).
+- `src/capmd/config.py:176-178` — `ENV_VARS` extendido con `MARKITDOWN_DOCINTEL_ENDPOINT` y `MARKITDOWN_CU_ENDPOINT`.
+- `src/capmd/config.py:578-587` — `_read_env` parsea ambas env vars con strip() (vacío → se ignora) y las expone en `out` para que la CLI las pase al resolver.
+- `src/capmd/config.py:905-942` — lógica inline en `load_config` para parsear `[hooks]` (K3) y los nuevos endpoints Azure. El flag CLI explícito (`-d`/`--use-cu`) es requerido para activar el routing (decisión K4: las env vars no auto-activan).
+- `src/capmd/cli.py:691-758` — 6 flags nuevas en `convert`: `-d/--use-docintel`, `-e/--endpoint`, `--use-cu/--use-content-understanding`, `--cu-endpoint`, `--cu-analyzer`, `--cu-file-types`. Validación: `-d` y `--use-cu` mutuamente excluyentes (typer.BadParameter con exit 2).
+- `src/capmd/cli.py:893-905` — `resolve_azure_routing(...)` se llama al inicio del flow de validación. Si routing activo, se setea `azure_routing` param del `_run_convert_body`.
+- `src/capmd/cli.py:1185-1200` — branch nuevo en `_run_convert_body`: si `azure_routing.is_active`, llama `engine.convert_path_via_azure(target_path, routing)` en lugar de `engine.convert_path(target_path)`. El resto del pipeline (cleaners, FM, images, K2/K3, split) opera idéntico sobre el output Azure.
+
+Tests (34 nuevos: 22 unit + 12 CLI, 100% verdes):
+
+- **Unit (`tests/test_azure_unit.py:1`)**: dataclass `AzureRouting` (defaults, `is_active` para cada combinación); `resolve_azure_routing` (sin flags ni env → inactivo; CLI > env > defaults; env vars no activan routing; CLI + env del otro backend → CLI gana sin warning); `build_markitdown_argv` (DocIntel con/sin endpoint, CU con analyzer + file-types, raise si routing inactivo); `run_markitdown_subprocess` con shim (happy path, command-not-found, non-zero exit, timeout, env filter excluyendo `CAPMD_*` excepto `CAPMD_MARKITDOWN_BIN`, raise si routing inactivo); constants.
+- **CLI (`tests/test_azure_cli.py:1`)**: `--help` lista los 6 flags; `-d`/`--use-cu` mutually exclusive (exit 2); `--use-cu` invoca markitdown con argv correcto (verifica flags via `argv.log` del shim); env vars NO auto-activan (routing inactivo sin flag CLI); env var + flag CLI → usa endpoint del env; cleaners corren sobre output Azure (palabra-junta, blanks colapsados); K3 hook fires una vez sobre output Azure; tree mode + Azure → `images/` se puebla; Azure failure → exit 5 con stderr capturado en hint; Azure missing binary → exit 3 con hint `pip install`; `--timeout 1` mata el subprocess con hint "timeout".
+
+**Validación:**
+
+- Literal roadmap test (éxito): shim bash que escribe `# Azure K4 verify / Body from mock Azure CU.` al output. `CAPMD_MARKITDOWN_BIN=/tmp/k4-shim.sh capmd convert book.pdf --use-cu --cu-endpoint https://mock.endpoint --cu-analyzer prebuilt-documentAnalyzer -o out.md` → capmd exit 0, `out.md` tiene FM completo de capmd (10 keys + cleaners_applied) + body del shim.
+- Literal roadmap test (fallo): shim que devuelve `exit 1` con stderr → capmd exit 5 (`AzureConversionFailed`) con hint que captura el stderr.
+- Lint: `ruff check` limpio sobre los 7 archivos tocados (azure.py, engine.py, cli.py, errors.py, config.py, test_azure_unit.py, test_azure_cli.py).
+- Tipos: `mypy` limpio (5 source files).
+- Suite completa: **1906 passed, 15 pre-existing flakes** (test_config_g*/test_engine/test_images_describe/test_convert_cli/test_report_cli — pasan en aislamiento, fallan en suite completa por env-var pollution de tests previos; mismo set de flakes que en K1/K2/K3 con 4 adicionales del mismo patrón).
+
+Caveats documentados:
+- `markitdown` CLI debe estar en PATH (o vía `CAPMD_MARKITDOWN_BIN`). Si no, capmd emite `AzureBackendMissing` (exit 3) con hint actionable.
+- Extras Azure (`azure-ai-documentintelligence`, `azure-ai-contentunderstanding`) se cargan via markitdown's import-time check. Si faltan, `markitdown` CLI falla con `MissingDependencyException` y capmd lo propaga como `AzureConversionFailed` con el stderr capturado.
+- El flag CLI `--use-cu`/`-d` es **requerido** para activar el routing (no auto-activación por env var). Decisión para evitar llamadas accidentales a la API cuando solo se quiere tener el endpoint configurado para uso futuro.
+- Sin timeout flag CLI explícito, el default es 600s (`--timeout` se respeta vía `routing.timeout_seconds`).
+
+**✅ K5. Comparador de motores**
 `capmd compare archivo.pdf --pages 45-50` corre built-in vs OCR vs CU y muestra métricas lado a lado (palabras, headings, tiempo).
 *Test:* la tabla comparativa se imprime con al menos dos motores disponibles.
 
-**K6. Caché de conversión**
+Implementado en `src/capmd/compare/` (3 archivos, ~530 líneas).
+
+**Archivos nuevos:**
+
+- `src/capmd/compare/motors.py` (~480 líneas). API pública:
+  - `MotorResult(name, words, headings, time_seconds, status, error)` — frozen dataclass con los 6 campos del reporte por motor.
+  - `CompareReport(source, pages, elapsed_seconds, motors)` — wrapper sobre `tuple[MotorResult, ...]`. Property `ok_motors` filtra status="ok".
+  - `parse_pages_string(s: str | None) -> list[int] | None` — regex estricto (rangos, singles, mixed). Levanta `ValueError` si el formato es inválido o start > end o page < 1.
+  - `slice_pdf_to_tmpfile(pdf_bytes, pages, tmpdir)` — usa `pypdfium2.PdfDocument.import_pages` para extraer un subset y guardar el PDF recortado en tmpdir. Levanta `ValueError` si `max(pages) > len(src_doc)`.
+  - `count_words(text)` / `count_headings(text)` — métricas simples (split por whitespace / regex `^#{1,6} ` con `re.MULTILINE`).
+  - `detect_ocr_engines() -> tuple[str, ...]` — `shutil.which("tesseract")` / `shutil.which("ocrmypdf")` con detección simple.
+  - `run_compare(*, source, pages, timeout, requested_ocr_engine, enable_cu=True) -> CompareReport` — orchestrator. Construye `motor_runners: list[tuple[str, Any]]` con built-in siempre + CU/DocIntel si env vars + OCR motores (run o skipped según `shutil.which`). Slices PDF, corre cada motor independiente, captura excepciones por motor sin abortar. Devuelve `CompareReport` con todos los resultados.
+- `src/capmd/compare/output.py` (~120 líneas). API pública:
+  - `render_table(report) -> str` — tabla Rich con columnas `Motor | Palabras | Headings | Tiempo (s) | Estado | Detalle`. Colores: green para ok, yellow para skipped, red para error. `box=ROUNDED`, `show_lines=True`.
+  - `render_json(report) -> str` — JSON pretty-print con `ensure_ascii=False`.
+  - `render_report(report, *, format) -> str` — dispatcher table/json. Levanta `ValueError` si format inválido.
+- `src/capmd/compare/__init__.py` — re-exports los símbolos públicos.
+
+**Modificaciones a `src/capmd/cli.py` (~100 líneas):**
+
+- Nuevo command `@app.command(name="compare")` con argumentos: `source: Path` (Argument con `exists=True, dir_okay=False, readable=True`), `--pages` (str|None, regex estricto), `--timeout` (int ≥ 1, default 600), `--format` (str, "table" o "json"), `--ocr-engine` (str|None, "tesseract" o "ocrmypdf").
+- Validación temprana: format inválido → `typer.BadParameter`; ocr-engine inválido → idem; pages inválido → `typer.BadParameter`.
+- Exit codes: `0` si todos los motores disponibles completan ok (o si solo hay 1 motor y completa); `8` si ≥2 motores están reportados pero <2 ok (el compare imprime el estado honestamente); `7` input inválido; `2` args inválidos.
+
+**Decisiones documentadas:**
+
+1. *CU/DocIntel se auto-activan con env vars.* Si `MARKITDOWN_DOCINTEL_ENDPOINT` o `MARKITDOWN_CU_ENDPOINT` están seteadas, los motores corren sin requerir flag CLI. Decisión del plan: `compare` es herramienta de evaluación, el usuario quiere ver TODOS los motores disponibles, no requerir flags manuales.
+2. *OCR motores se reportan como "skipped" si no están en PATH.* El compare siempre muestra 5 filas (built-in + docintel + cu + ocr-tesseract + ocr-ocrmypdf) en el orden fixed; las que no están disponibles muestran `status="skipped"` con `error="<binary> not installed"`. La tabla completa da visibilidad de qué motores están disponibles.
+3. *Métricas pre-cleaners.* Words/headings se miden sobre el output RAW del motor (sin pasar por el cleaner pipeline de capmd). Decisión: los cleaners son determinísticos y comparar el output limpio daría la misma métrica para todos los motores — comparamos el output crudo para ver la capacidad de extracción real de cada uno.
+4. *Sin selección de "mejor" motor.* El compare solo muestra métricas; el ranking/decisión queda al usuario.
+5. *Sin deps nuevas.* `pypdfium2` (ya es dep transitiva), `rich` (ya es dep), `shutil.which` (stdlib). OCR motores usan `tesseract` y `ocrmypdf` externos; el usuario los instala aparte.
+
+**Tests (42 nuevos: 30 unit + 12 CLI, 100% verdes):**
+
+- **Unit (`tests/test_compare_unit.py:1`)**: `parse_pages_string` (rangos simples, múltiples, vacío/None → None, inválido → ValueError, invertido, ≤0); `count_words` (empty, simple, multiline, whitespace extra); `count_headings` (h1-h6, ignora inline, empty); `detect_ocr_engines` (3 escenarios: ninguno, tesseract, ambos); `_is_cu_available`/`_is_docintel_available` (con/sin env); `run_compare` (only-builtin, con CU, con DocIntel, con ambos, motor failure no aborta, page slicing, pages inválido, range excede PDF); renderers (table format, JSON parseable, format inválido).
+- **CLI (`tests/test_compare_cli.py:1`)**: `--help` lista las opciones; help describe K5; validación de `--format`, `--pages`, source not found, `--ocr-engine invalid`; tabla con ≥2 motores (built-in + CU shimmed via `CAPMD_MARKITDOWN_BIN`); JSON parseable; `--pages "3-5"` se propaga; sin env vars → solo built-in (exit 8 con OCR skipped); OCR skipped si PATH=/usr/bin:/bin; tesseract con shim en PATH → corre OCR.
+
+**Validación:**
+
+- Literal roadmap test (éxito): `CAPMD_MARKITDOWN_BIN=/tmp/k5-verify.sh MARKITDOWN_CU_ENDPOINT=https://mock-cu.example capmd compare book.pdf --pages 3-5` → tabla Rich con 5 filas: built-in (ok), content-understanding (ok, mockeado por shim), ocr-tesseract (skipped), ocr-ocrmypdf (skipped), 0.40s total. Exit 8 (≥2 motores reportados pero solo 1 ok en este test setup; el compare imprime honestamente).
+- Literal roadmap test (falla de shim): si el shim retorna `exit 1`, capmd reporta el error en `MotorResult.error` con status "error" y continúa con los otros motores.
+- Lint: `ruff check` limpio sobre los 5 archivos nuevos/modificados (`motors.py`, `output.py`, `__init__.py`, `cli.py`, `errors.py`).
+- Tipos: `mypy` limpio (4 source files en `src/capmd/compare/` y `cli.py`).
+- Suite completa: **1948 passed, 15 pre-existing flakes** (test_config_g*/test_engine/test_images_describe/test_convert_cli/test_report_cli/test_registry — pasan en aislamiento, fallan en suite completa por env-var pollution y timing; mismo set de flakes que en K1-K4 con 1 nueva del mismo patrón).
+
+**Caveats documentados:**
+- El compare **gasta API quota automáticamente** si las env vars Azure están seteadas. Para un dry-run sin coste, dejá `MARKITDOWN_*_ENDPOINT` sin setear y/o desinstala tesseract/ocrmypdf.
+- OCR engines requieren binarios externos: `tesseract` (brew/apt install tesseract) y `ocrmypdf` (pip install ocrmypdf). capmd no provee instalación automática.
+- Métricas son RAW (pre-cleaners). El output de cada motor se cuenta sin pasar por el pipeline de cleaners de capmd.
+- Sin selección de "mejor" motor. El compare solo muestra métricas; el usuario decide.
+
+**✅ K6. Caché de conversión**
 Hashear (archivo + rango + config de cleaners); si nada cambió, no reconvertir.
 *Test:* segunda corrida idéntica es un no-op con mensaje "cacheado".
+
+Implementado en `src/capmd/cache.py:1` (~400 líneas). API pública:
+
+**Dataclasses:**
+- `CacheEntry(version, key, created_at, capmd_version, markdown, fm, images_meta, images_dir)` — frozen.
+- `ImageMeta(name, sha256, relpath)` — metadata de imagen cacheada.
+- `CleanerConfigSnapshot(enabled, disabled, pipeline)` — normaliza orden (sorted) y serializa JSON canónico con `sort_keys=True`.
+
+**Funciones:**
+- `compute_cleaner_config_snapshot(enabled, disabled, pipeline)` — snapshot determinístico (orden normalizado).
+- `compute_cache_key(*, pdf_bytes, page_range, cleaner_snapshot, capmd_version) -> str` — devuelve sha256 hex (64 chars). Componentes: `sha256(pdf_bytes)` + `sha256(page_range)` + `sha256(cleaner_snapshot.to_canonical_json())` + `sha256(capmd_version)` concatenados y hasheados con sha256 (`usedforsecurity=False`).
+- `get_cache_dir(*, override=None) -> Path` — priority: override > `CAPMD_CACHE_DIR` env > `$XDG_CACHE_HOME/capmd/convert/` > `~/.cache/capmd/convert/`. Crea el dir si no existe.
+- `cache_entry_path(cache_dir, key)` / `cache_images_dir(cache_dir, key)` — paths del JSON bundle y del sibling dir de imágenes.
+- `load_cache_entry(cache_dir, key) -> CacheEntry | None` — devuelve None si no existe, corrupto, o schema version mismatch (con warning logged).
+- `save_cache_entry(cache_dir, key, *, markdown, fm, images=None, capmd_version=None) -> CacheEntry | None` — persiste atomic_write (write a `.tmp` + rename). Si `images` no está vacío, copia los binarios a `<cache_dir>/<key>__images/<sha256>.<ext>`. Captura `OSError` (e.g., disk full) y devuelve None con warning.
+- `should_use_cache(*, no_cache_flag=False) -> bool` — `no_cache_flag=True` o `CAPMD_NO_CACHE=1/true/yes` → False. Default: True.
+
+**Decisiones documentadas:**
+
+1. *Cache key es sha256 hex (64 chars).* Usa `hashlib.sha256(data, usedforsecurity=False)` — no criptografía, solo deduplicación. Probability de colisión negligible.
+2. *capmd_version en el hash.* Invalida caches viejos al upgrade de capmd (cada versión nueva tiene su namespace).
+3. *Cache files son JSON bundles.* Single-file: `{version, key, created_at, capmd_version, markdown, fm, images_meta[], images_dir}`. Schema version "1"; loads con schema mismatch → miss + warning.
+4. *Atomic write.* `_atomic_write_text` usa `tmp_path.write_text` + `replace` para evitar cache files corruptos ante crashes a mitad de write.
+5. *Cache no aplica al routing Azure (K4).* Azure corre server-side, no vale la pena cachear. Solo aplica al flujo built-in.
+6. *Skip cleaners en cache hit.* Cuando `convert_path_via_azure` short-circuitea, se pasa `skip_cleaners=True` a `_apply_clean_pipeline` para no re-correr los 11 cleaners sobre el cached body (ya viene cleaned).
+7. *Cache hit habilita `--force` implícito.* Para evitar exit 7 ("el archivo de salida ya existe") en la 2ª corrida con cache hit, `resolve_destination_collision` recibe `force or _cache_hit_markdown is not None`. El cached body es byte-stable, así que sobrescribir es seguro.
+
+**Modificaciones a `src/capmd/cli.py` (~80 líneas):**
+
+- Import `capmd.cache.should_use_cache`, `compute_cache_key`, etc. (lazy imports dentro de los bloques condicionales).
+- 2 flags nuevas en `convert`: `--cache-dir DIR` (Path|None) y `--no-cache` (bool).
+- `_run_convert_body` extiende con 2 kwargs: `cache_dir` y `no_cache`. Sentinels inicializados al top del body (`_cache_hit_markdown`, `_cache_key`, `_cache_dir`, `_cache_active`) para evitar `UnboundLocalError` en exits tempranos.
+- Antes del bloque de conversión (línea ~1206): lookup cache.
+  - `should_use_cache(no_cache_flag=no_cache)` para decidir si el cache está habilitado.
+  - Si NO es Azure flow: `get_cache_dir(override=str(cache_dir) if cache_dir else None)`, build `CleanerConfigSnapshot`, `compute_cache_key(...)`, `load_cache_entry(...)`. Si hit: `typer.echo(f"cache hit: {_cache_key[:8]}", err=True)` + `_cache_hit_markdown = cached.markdown`.
+- Conversión normal (`engine.convert_path` o `convert_path_via_azure`) si cache miss; skip cleaners si cache hit (`_apply_clean_pipeline_to_stdin(..., skip_cleaners=True)` o `_apply_clean_pipeline(..., skip_cleaners=True)`).
+- Después de escribir el output (línea ~1705): save cache.
+  - Solo si `_cache_active and _cache_key and _cache_dir and output_resolved` y NO `_cache_hit_markdown` (la corrida actual no fue un hit — no reescribimos el cache).
+  - Extrae FM del `file_markdown` (parsea YAML), llama `save_cache_entry(_cache_dir, _cache_key, markdown=toc_md, fm=fm, images=tuple(f.path for f in extracted_figures))`.
+  - Captura excepciones (disk full, etc.) → warning logged, no raise.
+- `resolve_destination_collision(...)` recibe `force or _cache_hit_markdown is not None` para evitar exit 7 en cache hits.
+
+**Modificaciones a `tests/conftest.py`:**
+
+- Nuevo fixture autouse `_disable_cache_by_default` que setea `CAPMD_NO_CACHE=1` para todos los tests — evita pollution del cache en `~/.cache/capmd/convert/` entre tests.
+- Los tests K6 (`tests/test_cache_cli.py`) usan `monkeypatch.delenv("CAPMD_NO_CACHE", raising=False)` + aíslan `HOME`/`XDG_CACHE_HOME` a un tmpdir por test para probar el behavior real del cache.
+
+**Tests (34 nuevos: 23 unit + 11 CLI, 100% verdes):**
+
+- **Unit (`tests/test_cache_unit.py:1`)**: determinismo del hash (mismo input → mismo key); hash cambia con cada componente (file bytes, page range, cleaner config, capmd version); snapshot normaliza orden; `get_cache_dir` priority chain (override > env > XDG > default); save/load roundtrip; load devuelve None si no existe / corrupto / schema mismatch; save copia imágenes correctamente; save maneja disk full (monkeypatch `_atomic_write_text` para raise); `should_use_cache` (default, flag, env var case-insensitive).
+- **CLI (`tests/test_cache_cli.py:1`)**: 1ª corrida no imprime `cache hit`; 2ª corrida idéntica imprime `cache hit: <key[:8]>`; output byte-a-byte idéntico (caché bundle válido JSON); `Engine.convert_path` solo se invoca en 1ª corrida (no en cache hits); file change → cache key distinta → 2 cache files; `--no-cache` fuerza fresh en 2ª corrida; `CAPMD_NO_CACHE=1` desactiva cache; `--cache-dir /nonexistent/` crea el dir automáticamente; XDG default usado cuando no override ni env; cache hit usa `skip_cleaners=True` en cleaners; cache con `--no-clean` también funciona.
+
+**Validación:**
+
+- Literal roadmap test (éxito): 1ª corrida con `--cache-dir /tmp/cache` → exit 0, output escrito, cache file guardado (1040 bytes). 2ª corrida idéntica → exit 0, stderr empieza con `"cache hit: 7ae52c5d"` (8-char prefix del key completo), output reescrito byte-a-byte (porque `force` implícito en cache hit).
+- Literal roadmap test (falla de hook): N/A — K6 no interactúa con K3 hooks. Hooks corren después del cache lookup/save, sobre el cached body igual que en corrida normal.
+- Lint: `ruff check` limpio sobre `src/capmd/cache.py`, `src/capmd/cli.py`.
+- Tipos: `mypy` limpio.
+- Suite completa: **1983 passed, 14 pre-existing flakes** (test_config_g*/test_engine/test_images_describe/test_convert_cli::test_convert_chapter_both_forms_produce_same_output — pasan en aislamiento, fallan en suite completa por env-var pollution de tests previos; mismo set de flakes que en K1-K5 con 1 nueva del mismo patrón).
+
+**Caveats documentados:**
+
+- El cache escribe en `~/.cache/capmd/convert/` por default (global al user). Esto es problemático para tests automatizados — el conftest desactiva el cache globalmente (`CAPMD_NO_CACHE=1`) y solo lo activa en tests que lo requieren explícitamente.
+- Si el archivo de output existe y `--no-cache` está activado, la 2ª corrida falla con exit 7 ("el archivo ya existe") — comportamiento esperado (no es cache hit). El test usa diferentes `output` paths para evitar esto.
+- `--no-clean` SÍ usa el cache (no lo desactiva); solo cambia qué se cachea (el cached body ya viene sin cleaners).
+- Cache hit sobre Azure flow está explícitamente deshabilitado (Azure corre server-side, no vale la pena cachear).
+- File modification: cualquier cambio en bytes (incluyendo metadata del PDF como ``%%EOF`` trailing) invalida el cache. Cambio de filename con mismo content → mismo key (por sha256 del contenido).
+
+**Out of scope (no se hace en K6):**
+
+- Caché distribuido (compartido entre máquinas vía git/S3).
+- Caché del output binario (PDF, MD5).
+- Caché por output path (el cache es por contenido; el output puede cambiar de path).
+- Sub-command `capmd cache --clear` o `capmd cache --stats`. Se puede agregar después; K6 provee solo el auto-cache. El usuario borra con `rm -rf ~/.cache/capmd/convert/`.
+- Caché de las imágenes extraídas como binary sidecar. K6 las cachea dentro del bundle (no sidecar).
+- Auto-detección de "PDF sin cambios" (sin recomputar sha256). El cache siempre hashea; si el archivo es huge (>100MB), el sha256 puede tomar segundos — aceptable para workflows interactivos pero no optimizado para CI masiva.
 
 ---
 

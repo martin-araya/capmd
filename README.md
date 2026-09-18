@@ -521,20 +521,222 @@ Sugerencia   usa --describe-images con markitdown-ocr, o --use-cu
 
 Limpiadores disponibles: `whitespace`, `hyphens`, `headers`, `pagenums`, `headings`, `code`, `lists`, `tables`, `notes`, `paragraphs`.
 
-### Motores alternativos
+### Motores alternativos (Azure Doc Intel / Content Understanding)
+
+Para PDFs escaneados o con layout complejo, capmd enruta a Azure vía `markitdown` (subprocess) en lugar del extractor local. La integración expone los mismos flags que `markitdown` CLI:
+
+| Flag | Backend | Notas |
+|---|---|---|
+| `-d`, `--use-docintel` | Azure Document Intelligence | Flag CLI requerido (no auto-activación) |
+| `-e <url>`, `--endpoint <url>` | DocIntel endpoint | Si se omite, se lee de `MARKITDOWN_DOCINTEL_ENDPOINT` |
+| `--use-cu`, `--use-content-understanding` | Azure Content Understanding | Mutuamente excluyente con `-d` |
+| `--cu-endpoint <url>` | CU endpoint | Si se omite, se lee de `MARKITDOWN_CU_ENDPOINT` |
+| `--cu-analyzer <id>` | CU analyzer ID | Ej: `prebuilt-documentAnalyzer` |
+| `--cu-file-types <a,b,c>` | CU routing | Comma-separated; ej: `pdf,jpeg,mp4` |
+
+Decisión K4: el routing solo se activa con **flag CLI explícito** (`-d` o `--use-cu`). Las env vars proveen endpoints pero no auto-activan el routing — evita llamadas a la API accidentales.
+
+Ejemplo:
+
+```bash
+# DocIntel con endpoint explícito
+capmd convert libro.pdf -d -e https://mi-docintel.cognitiveservices.azure.com -o out/
+
+# Content Understanding con analyzer
+capmd convert libro.pdf --use-cu \
+  --cu-endpoint https://mi-cu.cognitiveservices.azure.com \
+  --cu-analyzer prebuilt-documentAnalyzer \
+  --cu-file-types pdf,jpeg \
+  -o out/
+```
+
+El resto del pipeline (cleaners, `--profile study`, post_command hook, `--split h2`, images) corre **igual** sobre el markdown que devuelve Azure — el routing solo reemplaza el step de extracción inicial.
+
+Si los extras de Azure no están instalados en `markitdown`, la instalación se queja con un ImportError claro:
+
+```bash
+pip install 'markitdown[docintel,cu]'   # solo los extras necesarios
+pip install 'markitdown[all]'             # todos los extras
+```
+
+### Perfiles de output (K2)
 
 | Flag | Descripción |
 |---|---|
-| `-d`, `-e <endpoint>` | Azure Document Intelligence (passthrough a MarkItDown) |
-| `--use-cu`, `--cu-endpoint` | Azure Content Understanding |
+| `--profile study` | Activa el perfil de estudio: agrega sub-bloque `study:` al front matter y appendea 3 secciones vacías al cuerpo |
+| `--tag <texto>` | Tag para el front matter de `--profile study` (repetible; deduplicado preservando orden) |
+| `--reading-status <unread\|in_progress\|read>` | Estado de lectura inicial (default: `unread`). Auto-set `started_at` en `in_progress`, `finished_at` en `read` |
+| `--reset-study` | Con `--profile study`, limpia `started_at`/`finished_at` del archivo previo (default: preserva fechas editadas a mano) |
 
-También se leen `MARKITDOWN_DOCINTEL_ENDPOINT` y `MARKITDOWN_CU_ENDPOINT` del entorno.
+Ejemplo:
+
+```bash
+capmd convert book.pdf \
+  --profile study \
+  --tag rust --tag ownership \
+  --reading-status in_progress \
+  --out ~/Estudio
+```
+
+Resultado en el `.md`:
+
+```yaml
+---
+title: Ownership
+# ... (10 claves de F2) ...
+study:
+  tags: [rust, ownership]
+  reading_status: in_progress
+  started_at: 2026-09-17T03:00:00Z
+  finished_at: null
+---
+
+# Ownership
+
+Contenido del capítulo…
+
+## Resumen
+
+## Conceptos clave
+
+## Dudas
+```
+
+Los tags también se pueden prefijar desde el perfil del libro en `~/.config/capmd/config.toml`:
+
+```toml
+[books."rust-handbook"]
+tags = ["rust", "ownership"]
+reading_status = "unread"
+```
+
+`--tag X` en CLI gana sobre el TOML (precedencia consistente con G2). Sin `--profile study`, ni el front matter ni el cuerpo se modifican — la feature es opt-in.
+
+---
+
+## Plugin para el MarkItDown oficial
+
+`capmd` se declara como entry-point en el grupo `markitdown.plugin`, así que sus cleaners también quedan disponibles si usás `markitdown` directamente con `--use-plugins`.
+
+```bash
+# Verificar que el plugin está instalado
+markitdown --list-plugins
+# → capmd-cleaners   (package: capmd.markitdown_plugin:CleanersMarkItDownPlugin)
+
+# Limpiar un .md con la grilla oficial de markitdown
+markitdown archivo.md --use-plugins -o limpio.md
+
+# Flujo en dos pasadas para un PDF: convertir y luego limpiar
+markitdown libro.pdf -o tmp.md
+markitdown tmp.md --use-plugins -o limpio.md
+```
+
+El plugin acepta streams `.md`, `.markdown`, `.mkd`, `.mkdn` o con mimetype `text/markdown` y aplica el mismo `capmd.clean.default_pipeline()` (mismos 11 cleaners del bloque D). No consulta la config TOML ni las env vars: para control fino (`--only-clean`, `--skip-clean`, perfiles por libro) usá `capmd convert` directamente.
+
+---
+
+### Hooks post-conversión (K3)
+
+`post_command` en el TOML invoca un comando después de escribir el `.md` final al chapter root (no se invoca en `--split h2` por cada section; una corrida = un fire):
+
+```toml
+# ~/.config/capmd/config.toml
+[hooks]
+post_command = "~/bin/notify-discord.sh"
+post_command_timeout = 60   # opcional; default 60s; -1 = sin timeout
+
+# Override por libro (gana sobre el global)
+[books."rust-handbook"]
+post_command = "~/bin/index-in-obsidian.sh"
+```
+
+El script recibe el path al `.md` como `$1` y metadata adicional vía env vars:
+
+- `CAPMD_OUTPUT_PATH` (siempre)
+- `CAPMD_CAPMD_JSON_PATH` (tree mode; vacío si no existe)
+- `CAPMD_IMAGES_DIR` (tree mode; vacío si no existe)
+- `CAPMD_BOOK_SLUG`, `CAPMD_CHAPTER_SLUG`
+- `CAPMD_PROFILE` (perfil activo, p.ej. `study`; vacío si ninguno)
+- `CAPMD_VERSION`
+
+El timeout default es 60 segundos (`CAPMD_HOOK_TIMEOUT` env var para override global; `-1` desactiva el timeout). Si el hook devuelve exit code != 0, expira, o el binario no existe, `capmd` emite un warning a stderr pero la corrida termina con exit 0 (la salida del `.md` no se ve afectada).
+
+El hook **no se invoca** cuando:
+
+- No hay output a disco (stdout, sin `-o` ni `--out`).
+- Se usa `--dry-run` (es un mode plan-only).
+- La conversión falla antes de escribir el archivo.
+- `--split h2`: el hook se dispara **una sola vez** con el path al root `.md` del capítulo (los `sections/0N-*.md` NO disparan fires individuales).
+
+---
+
+### Caché de conversión (K6)
+
+La 2ª corrida idéntica es un **cache hit** (no-op):
+
+```bash
+# 1ª corrida (cache miss, normal convert + cleaners + cache save)
+capmd convert book.pdf -o out.md
+
+# 2ª corrida (cache hit — "cache hit: abcd1234" a stderr; el archivo
+# se reescribe byte-a-byte con el cached body; no se invoca markitdown
+# subprocess ni los 11 cleaners).
+capmd convert book.pdf -o out.md
+```
+
+Cache key: `sha256(file_bytes + page_range + cleaner_config + capmd_version)`. Cualquier cambio en estos componentes invalida el cache:
+- Archivo modificado → cache miss.
+- `--pages "1-3"` vs `--pages "1-3,7"` → cache miss.
+- `--only-clean X` vs `--only-clean Y` → cache miss.
+- Upgrade de capmd → todos los caches viejos quedan stale.
+
+Flags:
+
+- `--cache-dir DIR` / `CAPMD_CACHE_DIR` — override del directorio de cache.
+- `--no-cache` / `CAPMD_NO_CACHE=1` — desactiva cache (skip read + write).
+
+Default location: `$XDG_CACHE_HOME/capmd/convert/` (o `~/.cache/capmd/convert/` si XDG no está set).
+
+El cache guarda el markdown body post-cleaners + FM + imágenes extraídas. El resto del pipeline (split K4, profile study K2, hooks K3) opera sobre el cached body igual que en una corrida normal. El flag `--no-clean` (saltar cleaners) NO desactiva el cache — solo cambia qué se cachea (el cached body ya viene sin cleaners).
+
+**Orden del pipeline con cache:** cache lookup → markitdown/cleaners → FM prepend → write output → **post_command hook** → cache save. Si tenés un hook K3 que modifica el `.md` (raro pero posible — ej: append "metadata: ..."), el hook corre ANTES del cache save, así que el archivo en disco difiere del cached body. La próxima corrida (cache hit) reproduce el cached body, no el archivo modificado. Si necesitás que el cache refleje post-hooks, abrí un feature request.
+
+---
+
+### Comparador de motores (`capmd compare`, K5)
+
+```bash
+capmd compare book.pdf --pages 45-50
+capmd compare book.pdf --format json           # JSON estructurado
+capmd compare book.pdf --ocr-engine tesseract  # forzar un OCR específico
+```
+
+Compara lado a lado los motores de extracción disponibles:
+
+| Motor | Cuándo corre | Notas |
+|---|---|---|
+| `built-in` | siempre | markitdown local (PDF/EPUB/DOCX/PPTX/XLSX) |
+| `docintel` | `MARKITDOWN_DOCINTEL_ENDPOINT` set | Azure Document Intelligence (vía K4) |
+| `content-understanding` | `MARKITDOWN_CU_ENDPOINT` set | Azure Content Understanding (vía K4) |
+| `ocr-tesseract` | `tesseract` en PATH | renderiza pages a PNG vía pypdfium2 + tesseract OCR |
+| `ocr-ocrmypdf` | `ocrmypdf` en PATH | `ocrmypdf --skip-text` + extracción built-in |
+
+Métricas: `palabras` (`len(text.split())`), `headings` (`^#{1,6} ` count), `tiempo` (subprocess wall-time), `estado` (`ok` | `skipped` | `error`).
+
+Flags:
+
+- `--pages <rango>`: rango 1-based (ej: `"45-50"` o `"1-3,7,10-12"`); default todo el archivo.
+- `--timeout <seg>`: timeout por motor (default 600s).
+- `--format <table|json>`: Rich table a stdout (default) o JSON pretty-print.
+- `--ocr-engine <tesseract|ocrmypdf>`: forzar un OCR específico (default: auto-detect los que estén en PATH).
+
+Exit codes: `0` (ok; o ≥1 motor disponible pero <2 ok), `8` (≥2 motores disponibles pero <2 ok — el compare imprime el estado honestamente), `7` (input inválido), `2` (args inválidos).
+
+Si los motores Azure están configurados por env vars, el compare **gasta API quota automáticamente** sin pedir confirmación. Para un "dry-run" sin coste, dejá `MARKITDOWN_*_ENDPOINT` sin setear.
 
 ---
 
 ## Formato de salida
-
-El `.md` generado lleva front matter YAML:
 
 ```yaml
 ---
@@ -560,6 +762,8 @@ Con `--profile study` se añaden secciones vacías listas para trabajar:
 
 ## Dudas
 ```
+
+Ver la sección "Perfiles de output (K2)" arriba para los flags completos (`--tag`, `--reading-status`, `--reset-study`) y el sub-bloque `study:` que se agrega al front matter.
 
 Y un `capmd.json` con la metadata completa, los stats de limpieza y el listado de figuras, para poder re-procesar sin volver a leer el PDF.
 
