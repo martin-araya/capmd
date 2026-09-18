@@ -1089,8 +1089,13 @@ def _run_convert_body(
     """
     sliced_temp: Path | None = None
     # K6 cache sentinels — inicializados al top para que las refs en stdin
-    # path y path branch (líneas 1348 y 1435) no disparen UnboundLocalError.
-    # El lookup real ocurre solo en el path branch (no en stdin/Azure).
+    # path y path branch (cli.py:1436, 1670, 1699-1705) no disparen
+    # UnboundLocalError cuando source == "-" (stdin) o cuando Azure routing
+    # devuelve _cache_active=False. El lookup real ocurre solo en el path
+    # branch (no en stdin/Azure).
+    _cache_active: bool = False
+    _cache_key: str | None = None
+    _cache_dir: Path | None = None
     _cache_hit_markdown: str | None = None
     extract_pages: list[int] | None = None
     chapter_index: int = 1
