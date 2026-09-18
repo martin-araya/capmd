@@ -60,6 +60,9 @@ docs = [
 [project.scripts]
 capmd = "capmd.cli:app"
 
+[project.entry-points."markitdown.plugin"]
+capmd-cleaners = "capmd.markitdown_plugin:CleanersMarkItDownPlugin"
+
 [project.urls]
 Homepage = "https://github.com/martin-araya/capmd"
 Issues = "https://github.com/martin-araya/capmd/issues"
