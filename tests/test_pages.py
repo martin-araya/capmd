@@ -113,6 +113,45 @@ def test_total_pages_zero_raises() -> None:
         parse_pages("1", total_pages=0)
 
 
+# --- FIX-5 / D5: validación end > total_pages ---
+
+
+def test_pages_end_out_of_bounds_raises_rangeoutofbounds() -> None:
+    """FIX-5: ``--pages 1-99`` en PDF de 18pp debe fallar con
+    RangeOutOfBounds antes de llegar al motor (antes daba IndexError)."""
+    with pytest.raises(RangeOutOfBounds) as excinfo:
+        parse_pages("1-99", total_pages=18)
+    assert excinfo.value.exit_code == 4
+    msg = excinfo.value.message
+    assert "18" in msg
+    assert "1-18" in msg
+
+
+def test_pages_inverse_range_descending_rejected() -> None:
+    """FIX-5: ``--pages 10-3`` (start > end, rango descendente) falla
+    con ValueError descriptivo, NO con IndexError."""
+    with pytest.raises(ValueError, match="rango descendente"):
+        parse_pages("10-3", total_pages=20)
+
+
+def test_pages_exact_boundary_is_valid() -> None:
+    """FIX-5 regresión: ``--pages 1-18`` en PDF de 18pp es válido."""
+    result = parse_pages("1-18", total_pages=18)
+    assert list(result.pages) == list(range(1, 19))
+
+
+def test_pages_end_just_above_boundary() -> None:
+    """FIX-5: ``--pages 1-19`` en PDF de 18pp falla (un solo page de más)."""
+    with pytest.raises(RangeOutOfBounds):
+        parse_pages("1-19", total_pages=18)
+
+
+def test_pages_comma_list_with_one_out_of_range() -> None:
+    """FIX-5: lista con un rango fuera de bounds → falla."""
+    with pytest.raises(RangeOutOfBounds):
+        parse_pages("1-5,10-99", total_pages=20)
+
+
 # --- C7: translate_spec ---------------------------------------------------
 
 

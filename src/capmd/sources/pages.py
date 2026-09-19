@@ -106,6 +106,15 @@ class _TokenParser:
                 f"página {start} fuera del documento (tiene {total_pages})",
                 hint="revisá el spec de --pages o usá --page-offset si la numeración impresa difiere",
             )
+        # FIX-5 / D5: también validar el extremo superior. Antes del fix,
+        # ``--pages 1-99`` en un PDF de 18pp generaba ``range(1, 100)``
+        # y pypdfium2 lanzaba ``IndexError`` raw al acceder a página 19.
+        if end > total_pages:
+            raise RangeOutOfBounds(
+                f"--pages {start}-{end}: el PDF tiene {total_pages} páginas; "
+                f"el rango válido es 1-{total_pages}",
+                hint="ajustá el extremo superior (o usá --page-offset si la numeración impresa difiere)",
+            )
         return start, end
 
 
