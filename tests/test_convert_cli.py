@@ -319,6 +319,26 @@ def test_convert_keep_raw_uses_cwd_when_no_output(
     assert (tmp_path / ".capmd" / "raw.md").exists()
 
 
+def test_convert_keep_raw_with_out_writes_inside_chapter_dir(
+    tmp_path: Path,
+) -> None:
+    """FIX-4: ``--keep-raw --out <dir>`` → snapshot vive dentro del
+    chapter dir (``<dir>/<book>/<chapter>/.capmd/raw.md``), no en cwd."""
+    pdf = build.build_headings_pdf(tmp_path / "h.pdf")
+    out_dir = tmp_path / "out"
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["convert", str(pdf), "--out", str(out_dir), "--keep-raw"]
+    )
+    assert result.exit_code == 0, result.stderr
+    # Hallar el chapter dir creado por --out.
+    mds = list(out_dir.rglob("*.md"))
+    assert mds, "no se creó ningún .md bajo out_dir"
+    chapter_dir = mds[0].parent
+    snapshot = chapter_dir / ".capmd" / "raw.md"
+    assert snapshot.exists(), f"snapshot falta en {snapshot}"
+
+
 def test_convert_without_keep_raw_does_not_create_capmd(tmp_path: Path) -> None:
     """Test literal del spec B6: sin flag, no se crea el directorio."""
     pdf = build.build_headings_pdf(tmp_path / "h.pdf")
@@ -448,6 +468,21 @@ def test_convert_pages_out_of_bounds_exits_4(tmp_path: Path) -> None:
     result = runner.invoke(app, ["convert", str(pdf), "--pages", "200"])
     assert result.exit_code == 4
     assert "fuera del documento" in result.stderr
+
+
+def test_convert_pages_end_out_of_bounds_exits_4_no_traceback(
+    tmp_path: Path,
+) -> None:
+    """FIX-5 integración: ``--pages 1-99`` en PDF corto → rc=4 con
+    mensaje accionable y SIN traceback crudo."""
+    pdf = build.build_outline_toc_pdf(tmp_path / "small.pdf")
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["convert", str(pdf), "--pages", "1-99"]
+    )
+    assert result.exit_code == 4
+    assert "rango válido" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_convert_pages_bad_syntax_exits_2(tmp_path: Path) -> None:
