@@ -6,12 +6,19 @@ Patrones reconocidos (en orden):
 2. ``— 47 —`` / ``– 47 –`` / ``- 47 -`` — em/en-dash o hyphen + número + cierre.
 3. ``47 | Capítulo 3`` — número + pipe + texto.
 4. ``Capítulo 3 | 47`` — texto + pipe + número (variante invertida).
+5. ``204  PART II  Requirements development`` (FIX-7 / D8) — footer
+   editorial de libros académicos con page number + 2+ espacios +
+   keyword cerrada (PART/Chapter/Section/APPENDIX/Volume/Module/Unit) +
+   texto.
 
 NO elimina:
 
 - Listas numeradas: ``1. foo`` (termina en ``.``), ``2) bar`` (termina en ``)``).
 - Referencias inline: ``ver página 47`` (no es línea completa).
 - Horizontal rule: ``---`` (sin número).
+- Inline: ``204 is the answer`` (palabra lowercase tras los espacios
+  no está en la alternancia cerrada del regex editorial — FIX-7
+  false-positive guard explícito).
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from capmd.clean.context import CleanContext
 
 __all__ = [
     "DEFAULT_NAME",
+    "EDITORIAL_FOOTER_RE",
     "EMDASH_NUMBER_RE",
     "NUMBER_ONLY_RE",
     "PIPE_NUMBER_LEFT_RE",
@@ -38,6 +46,13 @@ NUMBER_ONLY_RE = re.compile(r"^\d+$")
 EMDASH_NUMBER_RE = re.compile(r"^[—–\-]\s*\d+\s*[—–\-]$")
 PIPE_NUMBER_LEFT_RE = re.compile(r"^\d+\s*\|.+$")
 PIPE_NUMBER_RIGHT_RE = re.compile(r"^.+\|\s*\d+$")
+# Footer editorial: "<página>  <KEYWORD>  <texto>". Los keywords
+# son case-sensitive y lexicamente cerrados para no romper el caso
+# negativo "204 is the answer" (la palabra "is" no está en la
+# alternancia). Sin IGNORECASE justamente para mantener el guard.
+EDITORIAL_FOOTER_RE = re.compile(
+    r"^\s*\d{1,4}\s{2,}(?:PART|Chapter|Section|APPENDIX|Volume|Module|Unit)\s+\S.*$"
+)
 
 
 def is_page_number_line(line: str) -> bool:
@@ -49,6 +64,7 @@ def is_page_number_line(line: str) -> bool:
         or EMDASH_NUMBER_RE.match(line) is not None
         or PIPE_NUMBER_LEFT_RE.match(line) is not None
         or PIPE_NUMBER_RIGHT_RE.match(line) is not None
+        or EDITORIAL_FOOTER_RE.match(line) is not None
     )
 
 

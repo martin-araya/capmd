@@ -80,6 +80,66 @@ def test_strip_preserves_inline_english_reference() -> None:
     assert strip_page_number_lines("see page 47") == "see page 47"
 
 
+# --- FIX-7 / D8: editorial footer pattern ---
+
+
+def test_strip_editorial_footer_part_roman() -> None:
+    """FIX-7: footer editorial tipo ``204  PART II  Requirements development``
+    (típico de libros académicos) debe eliminarse como page number."""
+    assert strip_page_number_lines(
+        "foo\n204  PART II  Requirements development\nbar"
+    ) == "foo\n\nbar"
+
+
+def test_strip_editorial_footer_chapter_word() -> None:
+    """FIX-7: ``Chapter`` también matchea (regex case-sensitive, capital C)."""
+    assert strip_page_number_lines(
+        "heading\n100  Chapter 3  Ownership\nbody"
+    ) == "heading\n\nbody"
+
+
+def test_strip_editorial_footer_section_word() -> None:
+    assert strip_page_number_lines(
+        "intro\n42  Section 2.1  Heuristics\nmore"
+    ) == "intro\n\nmore"
+
+
+def test_strip_editorial_footer_appendix() -> None:
+    assert strip_page_number_lines(
+        "intro\n300  APPENDIX A  Bibliography\nmore"
+    ) == "intro\n\nmore"
+
+
+def test_strip_editorial_footer_volume_module_unit() -> None:
+    """FIX-7: cubre keywords secundarios (Volume/Module/Unit)."""
+    for keyword in ("Volume", "Module", "Unit"):
+        line = f"intro\n7  {keyword} 2  Details\nmore"
+        assert strip_page_number_lines(line) == "intro\n\nmore", keyword
+
+
+def test_strip_editorial_footer_case_sensitive_lowercase() -> None:
+    """FIX-7 false-positive guard: keywords son case-sensitive, lowercase NO matchea."""
+    assert strip_page_number_lines(
+        "foo\n204  part ii  Requirements development\nbar"
+    ) == "foo\n204  part ii  Requirements development\nbar"
+
+
+def test_strip_editorial_footer_does_not_match_inline_number() -> None:
+    """FIX-7 false-positive literal del audit: ``204 is the answer``
+    NO debe eliminarse (la palabra ``is`` no está en la alternancia)."""
+    assert strip_page_number_lines(
+        "foo\n204 is the answer\nbar"
+    ) == "foo\n204 is the answer\nbar"
+
+
+def test_strip_editorial_footer_requires_two_spaces() -> None:
+    """FIX-7 guard: con un solo espacio entre el número y el keyword,
+    NO matchea (evita falsos positivos en prosa)."""
+    assert strip_page_number_lines(
+        "foo\n204 Chapter 3 Ownership\nbar"
+    ) == "foo\n204 Chapter 3 Ownership\nbar"
+
+
 def test_strip_preserves_horizontal_rule() -> None:
     assert strip_page_number_lines("foo\n---\nbar") == "foo\n---\nbar"
 
