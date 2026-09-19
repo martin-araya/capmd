@@ -43,6 +43,7 @@ from capmd.clean.headings import (
     reconstruct_headings,
 )
 from capmd.clean.hyphens import DehyphenationCleaner, dehyphenate
+from capmd.clean.kerning import KerningCleaner, collapse_kerning
 from capmd.clean.lists import (
     ListsCleaner,
     repair_bullets,
@@ -99,6 +100,7 @@ __all__ = [
     "HeaderFooterOptions",
     "HeadingOptions",
     "HeadingReconstructor",
+    "KerningCleaner",
     "ListsCleaner",
     "PageNumberCleaner",
     "ParagraphJoinsCleaner",
@@ -108,6 +110,7 @@ __all__ = [
     "TablesCleaner",
     "WhitespaceCleaner",
     "collapse_blank_lines",
+    "collapse_kerning",
     "count_atx_level",
     "dehyphenate",
     "detect_footnote_block",

@@ -38,6 +38,7 @@ def test_default_pipeline_has_all_cleaners() -> None:
     names = {c.name for c in p.cleaners}
     expected = {
         "whitespace",
+        "kerning",
         "hyphens",
         "headers",
         "page_numbers",
@@ -56,16 +57,17 @@ def test_default_pipeline_order_matches_roadmap() -> None:
     p = default_pipeline()
     names = [c.name for c in p.cleaners]
     assert names[0] == "whitespace"
-    assert names[1] == "hyphens"
-    assert names[2] == "headers"
-    assert names[3] == "page_numbers"
-    assert names[4] == "headings"
-    assert names[5] == "single_h1"
-    assert names[6] == "code_blocks"
-    assert names[7] == "lists"
-    assert names[8] == "tables"
-    assert names[9] == "footnotes"
-    assert names[10] == "paragraph_joins"
+    assert names[1] == "kerning"
+    assert names[2] == "hyphens"
+    assert names[3] == "headers"
+    assert names[4] == "page_numbers"
+    assert names[5] == "headings"
+    assert names[6] == "single_h1"
+    assert names[7] == "code_blocks"
+    assert names[8] == "lists"
+    assert names[9] == "tables"
+    assert names[10] == "footnotes"
+    assert names[11] == "paragraph_joins"
 
 
 def test_default_pipeline_runs_without_error(tmp_path) -> None:
@@ -74,7 +76,7 @@ def test_default_pipeline_runs_without_error(tmp_path) -> None:
     ctx = CleanContext(source=src, format="pdf")
     result, stats = p.run("some input text   \n\n\nwith whitespace", ctx)
     assert isinstance(result, str)
-    assert len(stats) == 11
+    assert len(stats) == 12
 
 
 # --- filter_pipeline ---
@@ -98,7 +100,7 @@ def test_filter_skip_removes_selected() -> None:
     names = [c.name for c in filtered.cleaners]
     assert "tables" not in names
     assert "footnotes" not in names
-    assert len(names) == 9
+    assert len(names) == 10
 
 
 def test_filter_preserves_order() -> None:

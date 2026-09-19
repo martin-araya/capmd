@@ -86,6 +86,7 @@ def default_pipeline() -> Pipeline:
     from capmd.clean.headers import HeaderFooterCleaner
     from capmd.clean.headings import HeadingReconstructor
     from capmd.clean.hyphens import DehyphenationCleaner
+    from capmd.clean.kerning import KerningCleaner
     from capmd.clean.lists import ListsCleaner
     from capmd.clean.page_numbers import PageNumberCleaner
     from capmd.clean.paragraph_joins import ParagraphJoinsCleaner
@@ -96,6 +97,7 @@ def default_pipeline() -> Pipeline:
     return Pipeline(
         cleaners=(
             WhitespaceCleaner(),
+            KerningCleaner(),
             DehyphenationCleaner(),
             HeaderFooterCleaner(),
             PageNumberCleaner(),

@@ -12,7 +12,8 @@ tocan I/O, y se registran en orden explícito en
 | `whitespace`       | D1       | on      | Tabs vs spaces, dobles espacios, line endings mixtos            | Bloques indentados (Markdown los respeta)            |
 | `hyphens`          | D3       | on      | Palabras cortadas con `-` al final de línea (heurística + wordlist) | Compuestos (`well-known`), palabras no en wordlist   |
 | `headers`          | D4       | on      | Texto repetido al inicio/fin de cada página                     | Footers con info útil, headers intencionales         |
-| `page_numbers`     | D5       | on      | `"— 47 —"`, `"Página 47"`, `"47 \| Cap N"`                     | Referencias inline a números de página               |
+| `page_numbers`     | D5       | on      | `"— 47 —"`, `"Página 47"`, `"47 \| Cap N"`, `"204  PART II  Title"` (FIX-7) | Referencias inline a números de página, lowercase keywords |
+| `kerning`          | D9       | on      | Colapsa runs de letras/dígitos uppercase separados por 1-2 espacios (FIX-8) | Líneas mixtas, lowercase, con puntuación, code fences |
 | `headings`         | D6       | on      | Detecta jerarquía via font size + regex de Chapter              | Subtitulos sin keyword (`Chapter N`)                 |
 | `single_h1`        | D7       | on      | Múltiples H1 en el body → promueve uno                          | Documentos estructurados con varios H1 intencionales  |
 | `code_blocks`      | D8       | on      | Snippets indentados y fences faltantes                          | Bloques ya fenceados, indentación dentro de listas   |
@@ -216,14 +217,73 @@ Section B
 - Línea suelta (sin contexto, ≤4 chars) que es solo dígitos.
 - `"— N —"`, `"—N—"`, `"Página N"`, `"Pág. N"`.
 - `"47 | Cap 3"` (header-pagenum mezclado; combina con D4).
+- Footer editorial `"<num>  <KEYWORD>  <title>"` (FIX-7 / D8) con
+  keywords cerrados: `PART`, `Chapter`, `Section`, `APPENDIX`,
+  `Volume`, `Module`, `Unit`. Típico de libros académicos en inglés:
+  `"204  PART II  Requirements development"`.
 
 **Qué NO toca** (false-positive guards):
 - Línea con texto + número + texto (referencia inline al número de página).
 - `"Section 47"` o `"Capítulo 47"` (heading con número).
 - Números de página que el usuario marcó como `<!-- page N -->`
   (markitdown los preserva; no los tocamos).
+- Inline: `"204 is the answer"` — la palabra `is` no está en la
+  alternancia cerrada, así que el footer editorial no matchea
+  (FIX-7 guard explícito contra false positives).
+- Keywords lowercase: `"204  part ii  Title"` NO matchea (regex
+  case-sensitive para mantener el guard).
 
 **Test**: `tests/test_clean_page_numbers.py`.
+
+---
+
+## `kerning` (FIX-8 / D9)
+
+**Objetivo**: colapsar artefactos visuales de kerning exagerado que
+`markitdown`/`pypdfium2` extrae literalmente. Ejemplo: en lugar de
+`CHAPTER 11` el motor emite `C H A P T E R   1 1`.
+
+**Input**:
+```
+Intro
+
+C H A P T E R   1 1
+
+Requirements
+```
+
+**Output**:
+```
+Intro
+
+CHAPTER   11
+
+Requirements
+```
+
+**Política**: solo se procesan líneas que, tras `strip()`, son 100%
+uppercase + dígitos + espacios. El regex `\b[A-Z0-9](?: {1,2}[A-Z0-9])+\b`
+matchea cada run, colapsando los espacios 1-2 intermedios pero
+preservando separadores más anchos (3+ espacios). El whitespace
+residual lo normaliza `whitespace` (cleaner anterior en el pipeline).
+
+**Posición en pipeline**: entre `whitespace` y `hyphens`. Corre
+después de la normalización Unicode (NBSP→espacio, etc.) y antes de
+operaciones más invasivas.
+
+**Qué NO toca** (false-positive guards):
+- Líneas mixtas: `"Section A B"` (contiene minúsculas).
+- Lowercase: `"c h a p t e r 1 1"` (no es artefacto de kerning).
+- Con puntuación: `"A B C, donde A=1"` (rompe uppercase-only-line).
+- Code fences: `` ```bash\nA B C\n``` `` preservados por
+  `split_outside_fences`.
+
+**Upstream note**: si el PDF tiene `ActualText` en el `ToUnicode`
+map, markitdown debería usarlo en lugar de exponer el kerning al
+texto plano. Vale la pena abrir issue upstream si los PDFs afectados
+son muchos; mientras tanto `kerning` cubre el caso.
+
+**Test**: `tests/test_kerning.py`.
 
 ---
 
