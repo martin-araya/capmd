@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from capmd.errors import IOError
+from capmd.errors import IOError as CapmdIOError
 
 __all__ = ["write_raw_snapshot"]
 
@@ -21,19 +21,31 @@ __all__ = ["write_raw_snapshot"]
 def write_raw_snapshot(
     raw_markdown: str,
     *,
-    output_path: Path | None,
+    output_path: Path | None = None,
+    out_dir: Path | None = None,
+    book_slug: str | None = None,
+    chapter_slug: str | None = None,
 ) -> Path:
-    """Escribe ``raw_markdown`` en ``<dest>/.capmd/raw.md`` y devuelve la ruta.
+    """Escribe ``raw_markdown`` y devuelve la ruta absoluta del archivo.
+
+    Resolución del destino (FIX-4 / D4):
+
+    - ``output_path`` no-None (single-file mode ``-o``):
+      ``<output.parent>/.capmd/raw.md``.
+    - ``out_dir`` + ``book_slug`` + ``chapter_slug`` (tree mode ``--out``):
+      ``<out_dir>/<book_slug>/<chapter_slug>/.capmd/raw.md``.
+    - Si ninguno está provisto (stdout mode): fallback a
+      ``Path.cwd()/.capmd/raw.md`` (compatibilidad con tests legacy).
 
     Parameters
     ----------
     raw_markdown:
-        Contenido del markdown pre-limpieza. Hoy es el output de
-        ``Engine.convert_*``; mañana será ese output antes de pasar
-        por la pipeline de cleaners.
+        Contenido del markdown pre-limpieza.
     output_path:
-        Ruta del output final del CLI (``-o``). Si es ``None``
-        (output a stdout) se usa ``Path.cwd()``.
+        Ruta del output single-file (``-o``). Mutuamente excluyente
+        con ``out_dir``.
+    out_dir, book_slug, chapter_slug:
+        Tree mode: destino del snapshot dentro del chapter dir.
 
     Returns
     -------
@@ -42,17 +54,26 @@ def write_raw_snapshot(
 
     Raises
     ------
-    IOError:
-        Si no se puede crear ``.capmd/`` o escribir el archivo
-        (``exit_code=7``). El mensaje original del ``OSError`` se
+    CapmdIOError:
+        ``exit_code = 7``. El mensaje original del ``OSError`` se
         incluye como ``hint``.
     """
-    dest = output_path.parent.resolve() if output_path is not None else Path.cwd().resolve()
+    if output_path is not None:
+        dest = output_path.parent
+    elif (
+        out_dir is not None
+        and book_slug is not None
+        and chapter_slug is not None
+    ):
+        dest = out_dir / book_slug / chapter_slug
+    else:
+        dest = Path.cwd().resolve()
+
     snapshot_dir = dest / ".capmd"
     try:
         snapshot_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:  # pragma: no cover
-        raise IOError(  # pragma: no cover
+        raise CapmdIOError(  # pragma: no cover
             f"no se pudo crear el directorio de snapshot: {snapshot_dir}",
             hint=str(exc),
         ) from exc
@@ -60,8 +81,17 @@ def write_raw_snapshot(
     raw_path = snapshot_dir / "raw.md"
     try:
         raw_path.write_text(raw_markdown, encoding="utf-8")
+    except PermissionError as exc:
+        # FIX-6: permission denied en el snapshot también → rc=5 con
+        # hint específico del path que falló.
+        from capmd.errors import PermissionDenied as _PD
+        from capmd.output._atomic import _format_permission_hint
+        raise _PD(
+            f"sin permisos para escribir el snapshot: {raw_path}",
+            hint=_format_permission_hint(exc),
+        ) from exc
     except OSError as exc:
-        raise IOError(
+        raise CapmdIOError(
             f"no se pudo escribir el snapshot: {raw_path}",
             hint=str(exc),
         ) from exc

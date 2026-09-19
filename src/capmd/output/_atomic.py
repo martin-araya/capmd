@@ -19,3 +19,26 @@ def atomic_write_text(path: Path, content: str) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(content, encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _format_permission_hint(exc: OSError) -> str:
+    """FIX-6: construye un hint accionable para ``PermissionError``.
+
+    Inspecciona ``OSError.filename`` (archivo que falló) y
+    ``OSError.filename2`` (segundo archivo, típico de link/rename).
+    Apunta al directorio padre, que es donde el usuario suele tener
+    que ajustar permisos.
+
+    Si ``exc.filename`` es None (caso raro), devuelve un hint
+    genérico que sigue siendo útil.
+    """
+    failed = getattr(exc, "filename", None) or getattr(exc, "filename2", None)
+    if failed is not None:
+        failed_path = Path(failed)
+        # Apuntamos siempre al directorio padre: el archivo fallido
+        # muchas veces aún no existe (es el path destino del write),
+        # así que no podemos usar ``is_dir()``.
+        return (
+            f"verificá que '{failed_path.parent}' sea escribible por tu usuario"
+        )
+    return "verificá los permisos del directorio de salida"

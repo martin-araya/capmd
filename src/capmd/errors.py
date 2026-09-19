@@ -59,6 +59,18 @@ class IOError(CapmdError):
     exit_code = 7
 
 
+class PermissionDenied(CapmdError):
+    """El usuario no tiene permisos de escritura sobre el destino.
+
+    FIX-6: cuando ``capmd convert`` intenta escribir a un directorio
+    sin permisos de escritura para el usuario actual, lanza esta
+    subclase en lugar del genérico :class:`IOError`. El ``hint``
+    apunta al path real que falló (no a un ``images/`` simbólico).
+    """
+
+    exit_code = 5
+
+
 class ChapterDetectionFailed(CapmdError):
     """La heurística de outline no encontró capítulos en un PDF sin outline."""
 

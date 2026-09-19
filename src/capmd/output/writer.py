@@ -642,6 +642,14 @@ def build_capmd_json_v2(**kwargs: Any) -> CapmdJsonV2:
 def _write_text(path: Path, content: str) -> None:
     try:
         path.write_text(content, encoding="utf-8")
+    except PermissionError as exc:
+        # FIX-6: rc=5 con hint específico del path que falló.
+        from capmd.errors import PermissionDenied
+        from capmd.output._atomic import _format_permission_hint
+        raise PermissionDenied(
+            f"sin permisos para escribir {path}",
+            hint=_format_permission_hint(exc),
+        ) from exc
     except OSError as exc:  # pragma: no cover
         raise IOError(  # pragma: no cover
             f"no se pudo escribir {path}",
