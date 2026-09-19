@@ -290,14 +290,22 @@ def save_cache_entry(
     markdown: str,
     fm: dict[str, Any],
     images: tuple[Path, ...] | None = None,
+    images_relpaths: tuple[str, ...] | None = None,
     capmd_version: str | None = None,
 ) -> CacheEntry | None:
     """Persiste el entry al cache dir. Devuelve el entry escrito o ``None``
     si disk full / write falló (warning logged, no raise).
 
-    Si ``images`` no está vacío, copia los binarios a
-    ``<cache_dir>/<key>__images/<sha256>.<ext>`` y registra el sha256
-    en el bundle.
+    - ``images``: paths **absolutos** a los binarios a copiar al
+      ``<cache_dir>/<key>__images/<sha256>.<ext>``. Si un path no existe
+      o falla la copia, se omite del bundle (warning logged).
+    - ``images_relpaths`` (FIX-3): strings portables (relativas al
+      chapter_dir o nombres de archivo) que se almacenan en
+      ``images_meta[*].relpath``. Si no se provee, se usa el
+      ``str(img_path)`` del path absoluto. El restore no usa este campo;
+      solo es diagnóstico y para tests.
+
+    El bundle también registra el sha256 de cada imagen copiada.
     """
     from capmd.logging import get_logger
 
@@ -322,7 +330,7 @@ def save_cache_entry(
             )
             images_paths = ()
 
-        for img_path in images_paths:
+        for idx, img_path in enumerate(images_paths):
             if not img_path.is_file():
                 continue
             try:
@@ -344,11 +352,17 @@ def save_cache_entry(
                         "no se pudo copiar %s a cache: %s", img_path, exc
                     )
                     continue
+            # relpath: preferir el portable provisto por el caller.
+            relpath = (
+                images_relpaths[idx]
+                if images_relpaths is not None and idx < len(images_relpaths)
+                else str(img_path)
+            )
             images_meta.append(
                 ImageMeta(
                     name=img_path.name,
                     sha256=img_sha,
-                    relpath=str(img_path),
+                    relpath=relpath,
                 )
             )
 

@@ -1393,7 +1393,15 @@ def _run_convert_body(
         elapsed_seconds = result.elapsed_seconds
 
         if keep_raw:
-            snapshot_path = write_raw_snapshot(raw_markdown, output_path=output)
+            # FIX-4: snapshot single-file / stdout. Tree mode tiene su
+            # propio snapshot dentro del chapter dir después de la
+            # escritura del tree (ver más abajo) — escribimos el snapshot
+            # DELANTE del tree fallaría porque crearía el chapter_dir
+            # antes de que ``write_output_tree`` valide su existencia.
+            snapshot_path = write_raw_snapshot(
+                raw_markdown,
+                output_path=output,
+            )
             logger.info("snapshot crudo: %s", snapshot_path)
             _stderr.print(f"[dim]snapshot crudo: {snapshot_path}[/dim]")
 
@@ -1590,6 +1598,56 @@ def _run_convert_body(
                     only_clean=only_clean_str,
                     skip_clean=skip_clean_str,
                 )
+            # FIX-3: persistir cache en tree/flat mode. Antes del fix,
+            # el cache solo se guardaba en el branch single-file, así
+            # que ``--out`` nunca se beneficiaba de K6.
+            if paths is not None and paths.images_dir is not None:
+                # Calcular paths relativos al chapter_dir para que el
+                # bundle del cache sea portable (no dependa del
+                # absolute path de cada corrida).
+                _chapter_dir = paths.markdown_path.parent
+                _images_relpaths: list[str] = []
+                for _f in extracted_figures:
+                    if not _f.path:
+                        continue
+                    try:
+                        _images_relpaths.append(
+                            _f.path.relative_to(_chapter_dir).as_posix()
+                        )
+                    except ValueError:
+                        _images_relpaths.append(_f.path.name)
+            else:
+                _images_relpaths = []
+            _persist_k6_cache_entry(
+                cache_dir=_cache_dir,
+                cache_key=_cache_key,
+                cache_hit=_cache_hit_markdown is not None,
+                cache_active=_cache_active,
+                file_markdown=file_markdown,
+                toc_md=toc_md,
+                extracted_figures=extracted_figures,
+                images_relpaths=tuple(_images_relpaths),
+            )
+            # FIX-4: escribir snapshot dentro del chapter dir DESPUÉS
+            # del tree write (no antes — antes crearía el chapter_dir
+            # y ``write_output_tree`` rechazaría por colisión). El
+            # ``raw_markdown`` no se ve afectado por el tree write.
+            if keep_raw and paths is not None and not flat:
+                _chapter_dir_for_snap = paths.markdown_path.parent
+                snapshot_path = write_raw_snapshot(
+                    raw_markdown,
+                    out_dir=_chapter_dir_for_snap.parent.parent
+                    if _chapter_dir_for_snap.parent.parent
+                    else out_dir,
+                    book_slug=(
+                        _chapter_dir_for_snap.parent.name
+                        if _chapter_dir_for_snap.parent.parent
+                        else ""
+                    ),
+                    chapter_slug=_chapter_dir_for_snap.name,
+                )
+                logger.info("snapshot crudo: %s", snapshot_path)
+                _stderr.print(f"[dim]snapshot crudo: {snapshot_path}[/dim]")
             prog.advance(_t_write)
             prog.stop(_t_write)
             final_md_path = (
@@ -1681,7 +1739,17 @@ def _run_convert_body(
         )
         if output_resolved != output:
             _stderr.print(f"[dim]destino versionado: {output_resolved}[/dim]")
-        output_resolved.write_text(file_markdown, encoding="utf-8")
+        # FIX-6: traducir PermissionError → PermissionDenied rc=5 con
+        # hint específico del path que falló (no genérico).
+        try:
+            output_resolved.write_text(file_markdown, encoding="utf-8")
+        except PermissionError as exc:
+            from capmd.errors import PermissionDenied as _PD
+            from capmd.output._atomic import _format_permission_hint
+            raise _PD(
+                f"sin permisos para escribir {output_resolved}",
+                hint=_format_permission_hint(exc),
+            ) from exc
         logger.debug("escrito %d chars a %s", len(file_markdown), output_resolved)
         prog.advance(_t_write)
         prog.stop(_t_write)
@@ -1701,39 +1769,19 @@ def _run_convert_body(
         _single_chapter = _chapter_slug_from(
             chapter=resolved_chapter, page_range=resolved_page_range
         )
-        # K6: cache save. Solo built-in flow (Azure se cachea
-        # server-side). Persistimos el body markdown para que la 2ª
-        # corrida con mismos args sea un cache hit.
-        if (
-            not _cache_hit_markdown
-            and _cache_active
-            and _cache_key is not None
-            and _cache_dir is not None
-            and output_resolved is not None
-        ):
-            try:
-                from capmd.cache import save_cache_entry
-
-                # Construir FM (mismo path que el flujo normal) para
-                # cachear la versión con FM embedded.
-                _fm_for_cache = (
-                    _parse_existing_fm_to_dict(file_markdown)
-                    if file_markdown.startswith("---")
-                    else {}
-                )
-                save_cache_entry(
-                    _cache_dir,
-                    _cache_key,
-                    markdown=toc_md,
-                    fm=_fm_for_cache,
-                    images=tuple(f.path for f in extracted_figures if f.path),
-                    capmd_version=capmd.__version__,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "K6 cache save falló (%s): el convert sigue OK",
-                    exc,
-                )
+        # K6: cache save. FIX-3: la persistencia es responsabilidad del
+        # helper ``_persist_k6_cache_entry``, llamado también desde el
+        # branch tree. Single-file mode: ``file_markdown`` ya está
+        # calculado y ``output_resolved`` fue escrito.
+        _persist_k6_cache_entry(
+            cache_dir=_cache_dir,
+            cache_key=_cache_key,
+            cache_hit=_cache_hit_markdown is not None,
+            cache_active=_cache_active,
+            file_markdown=file_markdown,
+            toc_md=toc_md,
+            extracted_figures=extracted_figures,
+        )
 
         _maybe_run_post_command_hook(
             post_command=_cfg.post_command if _cfg is not None else None,
@@ -2375,6 +2423,62 @@ def _init_cache_state(
     cached = load_cache_entry(cache_dir, cache_key)
     hit_markdown: str | None = cached.markdown if cached is not None else None
     return True, cache_key, cache_dir, hit_markdown
+
+
+def _persist_k6_cache_entry(
+    *,
+    cache_dir: Path | None,
+    cache_key: str | None,
+    cache_hit: bool,
+    cache_active: bool,
+    file_markdown: str | None,
+    toc_md: str,
+    extracted_figures: list[Figure],
+    images_relpaths: tuple[str, ...] | None = None,
+) -> None:
+    """FIX-3: persiste el entry al cache K6 desde cualquier modo con
+    output a archivo (tree, flat, single-file). No-op cuando:
+
+    - hay cache hit (no reescribe el mismo body),
+    - el cache está inactivo (no_cache flag o flujo Azure),
+    - no hay file_markdown (stdout mode),
+    - faltan key/dir.
+
+    Usa paths **absolutos** para copiar binarios (parámetro ``images``
+    de ``save_cache_entry``) y ``images_relpaths`` para registrar la
+    forma portable (relativa al chapter_dir) en ``images_meta``.
+    """
+    if (
+        not cache_hit
+        and cache_active
+        and cache_key is not None
+        and cache_dir is not None
+        and file_markdown is not None
+    ):
+        try:
+            from capmd.cache import save_cache_entry
+
+            _fm_for_cache = (
+                _parse_existing_fm_to_dict(file_markdown)
+                if file_markdown.startswith("---")
+                else {}
+            )
+            _abs_images = tuple(
+                f.path for f in extracted_figures if f.path
+            )
+            save_cache_entry(
+                cache_dir,
+                cache_key,
+                markdown=toc_md,
+                fm=_fm_for_cache,
+                images=_abs_images,
+                images_relpaths=images_relpaths,
+                capmd_version=capmd.__version__,
+            )
+        except Exception as exc:
+            logger.warning(
+                "K6 cache save falló (%s): el convert sigue OK", exc
+            )
 
 
 def _maybe_run_post_command_hook(

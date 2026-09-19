@@ -369,3 +369,65 @@ def test_should_use_cache_env_var_empty_does_not_disable(
     monkeypatch.delenv("CAPMD_NO_CACHE", raising=False)
     monkeypatch.setenv("CAPMD_NO_CACHE", "")
     assert should_use_cache() is True
+
+
+# ---------------------------------------------------------------------------
+# FIX-3: relpath portable + persistencia en tree mode
+# ---------------------------------------------------------------------------
+
+
+def test_save_cache_entry_persists_relative_image_paths(
+    tmp_path: Path,
+) -> None:
+    """FIX-3: el campo ``relpath`` de ``images_meta`` debe almacenarse
+    en forma **portable** (relativa al chapter_dir) cuando el caller la
+    provee vía ``images_relpaths``, NO el path absoluto del ``images``.
+    Esto vuelve el bundle portable entre corridas/máquinas."""
+    import json
+
+    img_path = tmp_path / "fig-01-01.png"
+    img_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    entry = save_cache_entry(
+        tmp_path,
+        key="relkey",
+        markdown="x",
+        fm={},
+        images=(img_path,),
+        images_relpaths=("images/fig-01-01.png",),
+        capmd_version="0.1.0",
+    )
+    assert entry is not None
+
+    # El bundle JSON crudo debe tener el relpath portable (no absoluto).
+    bundle_path = tmp_path / "relkey.json"
+    assert bundle_path.is_file()
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    assert len(bundle["images_meta"]) == 1
+    relpath = bundle["images_meta"][0]["relpath"]
+    assert relpath == "images/fig-01-01.png"
+    # No debe contener el path absoluto del test.
+    assert str(tmp_path) not in relpath
+
+
+def test_save_cache_entry_falls_back_to_absolute_relpath(
+    tmp_path: Path,
+) -> None:
+    """FIX-3 regresión: si el caller no provee ``images_relpaths``, se
+    usa el path absoluto del binario (comportamiento legacy)."""
+    import json
+
+    img_path = tmp_path / "abs.png"
+    img_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    save_cache_entry(
+        tmp_path,
+        key="abskey",
+        markdown="x",
+        fm={},
+        images=(img_path,),
+        capmd_version="0.1.0",
+    )
+
+    bundle = json.loads((tmp_path / "abskey.json").read_text(encoding="utf-8"))
+    assert bundle["images_meta"][0]["relpath"] == str(img_path)

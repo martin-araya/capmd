@@ -296,3 +296,135 @@ def test_cache_with_no_clean_still_works(tmp_path: Path) -> None:
     r2 = _runner([*args, "-o", str(out2)], env=env)
     assert r2.exit_code == 0
     assert "cache hit:" in r2.stderr
+
+
+# ---------------------------------------------------------------------------
+# FIX-3: cache K6 debe persistir en --out (tree/flat mode)
+# ---------------------------------------------------------------------------
+
+
+def test_cache_saves_on_out_tree_mode(tmp_path: Path) -> None:
+    """FIX-3: dos corridas ``--out <dir>`` con mismo PDF + args →
+    la 2ª imprime ``cache hit:`` y solo queda 1 entry en cache_dir.
+    Antes del fix, --out no llamaba a save_cache_entry y la 2ª era
+    siempre miss (re-conversión completa).
+    """
+    pdf = _pdf(tmp_path)
+    cache_dir = tmp_path / "cache"
+    env = _isolated_env(tmp_path)
+
+    r1 = _runner(
+        [str(pdf), "--out", str(tmp_path / "out1"), "--cache-dir", str(cache_dir)],
+        env=env,
+    )
+    assert r1.exit_code == 0, (r1.stdout, r1.stderr)
+    assert "cache hit" not in r1.stderr
+    assert any(cache_dir.iterdir()), "1ª corrida con --out no escribió cache"
+
+    r2 = _runner(
+        [str(pdf), "--out", str(tmp_path / "out2"), "--cache-dir", str(cache_dir)],
+        env=env,
+    )
+    assert r2.exit_code == 0, (r2.stdout, r2.stderr)
+    assert "cache hit:" in r2.stderr, r2.stderr
+    # FIX-3: la 2ª corrida con --out no debe crear un 2º entry de cache.
+    assert len(list(cache_dir.iterdir())) == 1
+
+    # Los bodies (post-FM) deben coincidir. Nota: el bloque de front
+    # matter contiene ``converted_at`` que cambia por corrida (FIX-10),
+    # así que comparamos solo el cuerpo, todo después del cierre
+    # ``---\n`` que sigue al último item de ``cleaners_applied``.
+    def _body(text: str) -> str:
+        idx = text.find("\n---\n")
+        return text[idx + len("\n---\n"):] if idx >= 0 else text
+
+    md1 = list((tmp_path / "out1").rglob("*.md"))[0].read_text(encoding="utf-8")
+    md2 = list((tmp_path / "out2").rglob("*.md"))[0].read_text(encoding="utf-8")
+    assert _body(md1) == _body(md2), (md1[:300], md2[:300])
+
+
+def test_cache_tree_mode_second_run_reuses_markdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX-3: con cache hit en tree mode, ``Engine.convert_path`` no se
+    invoca (la parte cara de markitdown)."""
+    from capmd.convert import engine as engine_mod
+
+    calls: list[tuple] = []
+    original = engine_mod.Engine.convert_path
+
+    def spy(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(args)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(engine_mod.Engine, "convert_path", spy)
+
+    pdf = _pdf(tmp_path)
+    cache_dir = tmp_path / "cache"
+    env = _isolated_env(tmp_path)
+
+    _runner(
+        [str(pdf), "--out", str(tmp_path / "out1"), "--cache-dir", str(cache_dir)],
+        env=env,
+    )
+    n_1st = len(calls)
+    assert n_1st == 1, calls
+
+    _runner(
+        [str(pdf), "--out", str(tmp_path / "out2"), "--cache-dir", str(cache_dir)],
+        env=env,
+    )
+    # Cache hit: convert_path NO se invoca en la 2ª corrida.
+    assert len(calls) == n_1st, calls
+
+
+def test_cache_no_cache_flag_forces_fresh_tree(tmp_path: Path) -> None:
+    """FIX-3 regresión: ``--no-cache`` en la 2ª corrida tree →
+    miss, no imprime ``cache hit``."""
+    pdf = _pdf(tmp_path)
+    cache_dir = tmp_path / "cache"
+    env = _isolated_env(tmp_path)
+
+    _runner(
+        [str(pdf), "--out", str(tmp_path / "out1"), "--cache-dir", str(cache_dir)],
+        env=env,
+    )
+    r2 = _runner(
+        [
+            str(pdf), "--out", str(tmp_path / "out2"),
+            "--cache-dir", str(cache_dir),
+            "--no-cache",
+        ],
+        env=env,
+    )
+    assert r2.exit_code == 0
+    assert "cache hit:" not in r2.stderr
+
+
+def test_cache_flat_mode_also_persists(tmp_path: Path) -> None:
+    """FIX-3 regresión: ``--out --flat`` (single chapter.md, sin
+    capmd.json) también debe persistir al cache."""
+    pdf = _pdf(tmp_path)
+    cache_dir = tmp_path / "cache"
+    env = _isolated_env(tmp_path)
+
+    r1 = _runner(
+        [
+            str(pdf), "--out", str(tmp_path / "out1"),
+            "--flat", "--cache-dir", str(cache_dir),
+        ],
+        env=env,
+    )
+    assert r1.exit_code == 0
+    assert any(cache_dir.iterdir())
+
+    r2 = _runner(
+        [
+            str(pdf), "--out", str(tmp_path / "out2"),
+            "--flat", "--cache-dir", str(cache_dir),
+        ],
+        env=env,
+    )
+    assert r2.exit_code == 0
+    assert "cache hit:" in r2.stderr
+    assert len(list(cache_dir.iterdir())) == 1
